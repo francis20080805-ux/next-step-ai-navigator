@@ -1,0 +1,10 @@
+node_modules/
+.tools/
+dist/
+.data/
+.env*
+!.env.example
+.wrangler/
+.openai/execution-profile.json
+*.log
+design/*.png

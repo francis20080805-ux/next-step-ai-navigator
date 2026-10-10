@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "build": {
+    "command": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build"
+  },
+  "static": {
+    "directory": "dist"
+  },
+  "project_id": "appgprj_6aca281e07348191b5ff5a41eddd563c"
+}
