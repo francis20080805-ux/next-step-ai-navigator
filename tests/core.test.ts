@@ -218,3 +218,102 @@ test('removed and unavailable skills are not recommended', () => {
   assert.equal(result.kind, 'task');
   if (result.kind === 'task') assert.equal(result.task.steps.find((step) => step.action === 'video.captions')?.skillId, null);
 });
+
+test('copied video prompt begins with an execution request and names the real plugin and skills', () => {
+  const record = task('我要剪一个30秒短视频，带字幕，最后导出1080x1920竖屏，不要背景音乐');
+  const prompt = buildCodexPrompt(record, seedSkills);
+  assert.match(prompt, /^请先执行当前这一步：做视频。\n使用我提供的视频素材剪辑短视频/);
+  assert.match(prompt, /请调用插件「remotion」中的 Skill「remotion-create」（\$remotion-create）/);
+  assert.match(prompt, /执行要求：在已有视频上生成或校对字幕，校准字幕的起止时间/);
+  assert.match(prompt, /调用能力：插件「remotion」中的 Skill「remotion-captions」（\$remotion-captions）/);
+  assert.match(prompt, /Skill「remotion-render」（\$remotion-render）/);
+  assert.match(prompt, /用户原始需求：\n我要剪一个30秒短视频/);
+  assert.match(prompt, /时长：30秒；尺寸：1080×1920；方向：竖屏/);
+  assert.match(prompt, /明确不要：背景音乐/);
+  assert.doesNotMatch(prompt, /^任务：/);
+});
+
+test('copied follow-up begins with captions and keeps completed creation out of remaining work', () => {
+  const initial = task('用5张图片做一个30秒带字幕的视频');
+  const updated = task('视频已经做好了，现在还没字幕', initial);
+  const prompt = buildCodexPrompt(updated, seedSkills);
+  assert.match(prompt, /^请先执行当前这一步：给视频加字幕。/);
+  assert.match(prompt, /请调用插件「remotion」中的 Skill「remotion-captions」/);
+  assert.match(prompt, /后续补充：\n视频已经做好了，现在还没字幕/);
+  assert.match(prompt, /已经完成：做视频、整理视频素材。保留这些成果，不要重复执行/);
+  assert.match(prompt, /时长：30秒/);
+  assert.match(prompt, /数量：5张图片/);
+  const remaining = prompt.split('\n剩余流程（第一项就是当前步骤）：\n')[1];
+  assert.ok(remaining);
+  assert.doesNotMatch(remaining, /remotion-create|做视频/);
+  assert.match(remaining, /给视频加字幕/);
+  assert.match(remaining, /导出视频/);
+});
+
+test('finished video advances past material assembly while keeping step IDs and requested new edits', () => {
+  const initial = task('用5张产品图片做一个30秒产品视频，带字幕和音乐');
+  const updated = task('视频已经做好了，现在还没字幕', initial);
+  for (const action of ['video.create', 'video.materials']) {
+    assert.equal(updated.steps.find((step) => step.action === action)?.id, initial.steps.find((step) => step.action === action)?.id);
+    assert.equal(updated.steps.find((step) => step.action === action)?.status, 'completed');
+  }
+  assert.equal(updated.steps.find((step) => step.status === 'pending')?.action, 'video.captions');
+  for (const input of ['视频已经做好了，还要加音乐', '视频做好了，需要换音乐', '视频做好了，继续剪辑', '视频做好了，请调整素材顺序']) {
+    const edited = task(input, updated);
+    assert.equal(edited.steps.find((step) => step.action === 'video.materials')?.status, 'pending', input);
+    assert.equal(edited.steps.find((step) => step.status === 'pending')?.action, 'video.materials', input);
+    assert.equal(edited.steps.find((step) => step.action === 'video.create')?.status, 'completed', input);
+  }
+  const excluded = task('视频做好了，不要加音乐，现在还没字幕', initial);
+  assert.equal(excluded.steps.find((step) => step.status === 'pending')?.action, 'video.captions');
+  const firstRequest = task('视频已经做好了，只加背景音乐');
+  assert.equal(firstRequest.steps.find((step) => step.action === 'video.materials')?.status, 'pending');
+});
+
+test('structured AI completion also preserves finished video materials before captions', () => {
+  const initial = task('我要剪一个30秒视频，带字幕');
+  const updated = planWorkflowFromIntent('视频已经做好了，现在还没字幕', { ...initial.intent, hasExistingOutput: true, completedActions: ['video.create'] }, initial);
+  assert.equal(updated.steps.find((step) => step.action === 'video.materials')?.status, 'completed');
+  assert.equal(updated.steps.find((step) => step.status === 'pending')?.action, 'video.captions');
+  assert.equal(updated.originalInput, initial.originalInput);
+});
+
+test('copied prompt identifies connectors without inventing Skill calls', () => {
+  const prompt = buildCodexPrompt(task('我要给客户发邮件'), seedSkills);
+  assert.match(prompt, /请使用已连接的服务完成这一步（需要连接的服务：Gmail（连接器，不是 Skill））/);
+  assert.match(prompt, /执行要求：根据你的目的写清楚邮件主题和正文/);
+  assert.doesNotMatch(prompt, /\$Gmail|Skill「Gmail」|插件「Gmail」/);
+});
+
+test('copied prompt asks for actual missing materials before invoking capabilities', () => {
+  const prompt = buildCodexPrompt(task('帮老板做一份上个月销售数据PPT'), seedSkills);
+  assert.match(prompt, /^请先执行当前这一步：准备销售数据。/);
+  assert.match(prompt, /请向我索取下面缺少的文件或信息，收到后再继续/);
+  assert.match(prompt, /还需准备：上个月销售数据/);
+  assert.match(prompt, /调用能力：需要用户提供资料，暂不调用 Skill/);
+  assert.match(prompt, /不要把描述中的“已有”当作已经收到文件/);
+});
+
+test('completed and skipped steps are preserved without new execution instructions', () => {
+  const initial = task('我要做公司每月收支表');
+  const finished: TaskRecord = {
+    ...initial, status: 'completed',
+    steps: initial.steps.map((step) => ({ ...step, status: step.optional ? 'skipped' : 'completed' })),
+  };
+  const prompt = buildCodexPrompt(finished, seedSkills);
+  assert.match(prompt, /^这个任务的所有步骤都已完成/);
+  assert.match(prompt, /不要重新制作/);
+  assert.match(prompt, /已经跳过：按需要做图表。不要擅自补做这些步骤/);
+  assert.doesNotMatch(prompt, /剩余流程|请调用|请先执行当前/);
+});
+
+test('copied prompt uses actual catalog plugin metadata and does not infer a missing plugin', () => {
+  const record = task('视频已经做好了，只需要加字幕');
+  const importedCatalog = seedSkills.map((skill) => skill.id === record.steps[0].skillId ? { ...skill, pluginId: 'my-actual-plugin', name: 'my-caption-skill' } : skill);
+  const importedPrompt = buildCodexPrompt(record, importedCatalog);
+  assert.match(importedPrompt, /插件「my-actual-plugin」中的 Skill「my-caption-skill」（\$my-caption-skill）/);
+  const noPluginCatalog = importedCatalog.map((skill) => skill.id === record.steps[0].skillId ? { ...skill, pluginId: '' } : skill);
+  const prompt = buildCodexPrompt(record, noPluginCatalog);
+  assert.match(prompt, /请调用Skill「my-caption-skill」（\$my-caption-skill）/);
+  assert.doesNotMatch(prompt, /插件「my-actual-plugin」/);
+});

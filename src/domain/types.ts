@@ -33,6 +33,7 @@ export interface Clarification { question: string; options: string[]; originalIn
 export type InterpretationResult = { kind: 'clarification'; clarification: Clarification } | { kind: 'task'; task: TaskRecord; notice?: string };
 export interface Source {
   id: string; url: string; owner: string; repo: string; name: string; kind: 'repository' | 'author';
+  stars?: number;
   enabled: boolean; status: 'idle' | 'scanning' | 'complete' | 'partial' | 'error';
   lastCheckedAt: string | null; lastSuccessAt: string | null; skillCount: number;
   error: string | null; cursor: string | null; snapshotSha: string | null;

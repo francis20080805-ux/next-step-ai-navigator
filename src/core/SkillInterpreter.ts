@@ -41,7 +41,7 @@ export function interpretSkillMarkdown(markdown: string, filename = 'SKILL.md'):
   const leaf = pathParts.at(-1) ?? 'SKILL.md';
   const inferredName = /^skill\.md$/i.test(leaf) ? pathParts.at(-2) : leaf.replace(/\.md$/i, '');
   const named = typeof metadata.name === 'string' ? metadata.name.trim() : inferredName;
-  const name = named && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(named) ? named : `imported-skill-${hashText(markdown)}`;
+  const name = named && named.length <= 128 && !/[\r\n\u0000]/.test(named) ? named : `imported-skill-${hashText(markdown)}`;
   const body = frontmatter ? markdown.slice(frontmatter[0].length) : markdown;
   const firstParagraph = body.split(/\r?\n\s*\r?\n/).find((paragraph) => paragraph.trim() && !/^\s*(?:#|```)/.test(paragraph)) ?? '';
   const description = typeof metadata.description === 'string' ? metadata.description.trim() : firstParagraph.trim().slice(0, 1500);

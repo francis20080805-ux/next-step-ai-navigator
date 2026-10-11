@@ -31,7 +31,7 @@ export function Settings({ data, bridgeStatus, onChange, onStatus, onRestore, on
   async function restore(file?: File) {
     if (!file || busy) return; setBusy('restore'); setError('');
     try {
-      if (file.size > 20 * 1024 * 1024) throw new Error('备份文件超过 20 MB，无法恢复。');
+      if (file.size > 25 * 1024 * 1024) throw new Error('备份文件超过 25 MB，无法恢复。');
       const next = validateBackup(JSON.parse(await file.text()));
       if (!window.confirm('恢复备份会替换这台设备上的任务、收藏和导入能力。建议先导出当前备份。继续恢复吗？')) return;
       await onRestore(next); notify('备份已恢复。');

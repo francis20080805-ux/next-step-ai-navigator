@@ -117,22 +117,54 @@ export function completeStep(task: TaskRecord, stepId: string): TaskRecord {
   };
 }
 
-export function buildCodexPrompt(task: TaskRecord): string {
+export function buildCodexPrompt(task: TaskRecord, catalog: Skill[] = []): string {
   const pending = task.steps.filter((step) => step.status === 'pending');
   const completed = task.steps.filter((step) => step.status === 'completed');
+  const skipped = task.steps.filter((step) => step.status === 'skipped');
+  const current = pending[0];
+  const capability = (step: WorkflowStep) => catalog.find((skill) => skill.id === step.skillId);
+  const capabilityLabel = (step: WorkflowStep) => {
+    const skill = capability(step);
+    const name = skill?.name || step.skillName;
+    if (!step.skillId || !name) return '需要用户提供资料，暂不调用 Skill';
+    if ((skill?.capabilityKind ?? step.capabilityKind) === 'connector') return `需要连接的服务：${name}（连接器，不是 Skill）`;
+    const invokeName = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(name) ? `（$${name}）` : skill?.sourcePath ? `（原始路径：${skill.sourcePath}）` : '';
+    return `${skill?.pluginId ? `插件「${skill.pluginId}」中的 ` : ''}Skill「${name}」${invokeName}`;
+  };
+  const operation = (step: WorkflowStep) => {
+    if (step.action === 'video.create' && task.intent.subtype === '剪辑') return '使用我提供的视频素材剪辑短视频：裁掉多余片段，按原始需求调整片段顺序、节奏和画面，保留原始素材。';
+    if (step.action === 'video.captions') return '在已有视频上生成或校对字幕，校准字幕的起止时间，并按原始需求设置字幕样式；保留已经完成的画面和音频。';
+    if (step.action === 'video.export') return '把已经完成的视频导出为可播放的文件，使用下方指定的时长、尺寸、方向和格式；检查播放、画面、声音及需要的字幕，并给出成品文件。';
+    return step.description;
+  };
   const parameters = Object.entries(task.intent.parameters).filter(([, value]) => Boolean(value));
-  const excluded = Object.entries(task.intent.requirements).filter(([, value]) => value === 'excluded').map(([key]) => ({ captions: '字幕', music: '背景音乐', charts: '图表', export: '导出' }[key] ?? key));
+  const requirementNames: Record<string, string> = { captions: '字幕', music: '背景音乐', charts: '图表', export: '导出', analysis: '数据分析', check: '检查结果', responsive: '适配手机和电脑', publish: '发布', payment: '网站收款', database: '数据库', optimize: '性能优化', components: '组件', dashboard: '数据看板', onlyCaptions: '只添加字幕' };
+  const excluded = Object.entries(task.intent.requirements).filter(([key, value]) => value === 'excluded' && key !== 'onlyCaptions').map(([key]) => requirementNames[key] ?? key);
+  const required = Object.entries(task.intent.requirements).filter(([, value]) => value === 'required').map(([key]) => requirementNames[key] ?? key);
   const lines = [
-    `任务：${task.title}`, '', `用户原始需求：\n${task.originalInput}`,
+    ...(current ? [
+      `请先执行当前这一步：${current.title}。`, operation(current),
+      !current.skillId || !current.skillName
+        ? '这一步需要先准备真实材料。请向我索取下面缺少的文件或信息，收到后再继续，不要虚构数据或成果。'
+        : (capability(current)?.capabilityKind ?? current.capabilityKind) === 'connector'
+          ? `请使用已连接的服务完成这一步（${capabilityLabel(current)}）；先确认当前账号已经连接，并按原始需求操作。`
+          : `请调用${capabilityLabel(current)}，先读取该 Skill 的说明，再按本任务的要求执行这一步。`,
+      '完成当前步骤后，按下方剩余流程继续，给出实际成果文件或可核对的结果。',
+    ] : ['这个任务的所有步骤都已完成。请保留已有成果，不要重新制作，也不要再次执行已经完成或跳过的步骤；如需要修改，请先向我确认新的具体要求。']),
+    '', `最终目标：${task.title}`, `用户原始需求：\n${task.originalInput}`,
     ...(task.inputs.length > 1 ? ['', `后续补充：\n${task.inputs.slice(1).join('\n')}`] : []),
     ...(parameters.length ? ['', `要求：${parameters.map(([key, value]) => `${({ duration: '时长', resolution: '尺寸', orientation: '方向', images: '图片数量', quantity: '数量', format: '输出格式' } as Record<string, string>)[key] ?? key}：${value}`).join('；')}`] : []),
+    ...(required.length ? ['', `需要做到：${required.join('、')}`] : []),
     ...(task.intent.existingMaterials.length ? ['', `已有内容：${task.intent.existingMaterials.join('、')}`] : []),
-    ...(task.intent.missingMaterials.length ? ['', `还需准备：${task.intent.missingMaterials.join('、')}。请使用用户实际提供的数据，不要虚构资料或假设已连接云端账号。`] : []),
+    ...(task.intent.hasExistingOutput ? ['', '已有成果：已经有成品或已完成制作，请使用已有成果继续处理，不要从零重做。'] : []),
+    ...(task.intent.missingMaterials.length ? ['', `还需准备：${task.intent.missingMaterials.join('、')}。请先向我索取实际材料，不要虚构资料或假设已连接云端账号。`] : []),
     ...(excluded.length ? ['', `明确不要：${excluded.join('、')}`] : []),
-    ...(completed.length ? ['', `已经完成：${completed.map((step) => step.title).join('、')}。保留这些成果，继续后续步骤。`] : []),
-    '', '建议按以下顺序完成剩余工作：',
-    ...pending.map((step, index) => `${index + 1}. ${step.title}${step.skillName ? `（${step.capabilityKind === 'connector' ? '需要连接的服务' : '建议使用 Skill'}：${step.skillName}）` : '（需要用户提供资料）'}${step.optional ? '，按需要执行' : ''}`),
-    '', '请先确认当前环境里可以使用的能力；缺少能力或材料时说明需要补充什么。',
+    ...(completed.length ? ['', `已经完成：${completed.map((step) => step.title).join('、')}。保留这些成果，不要重复执行。`] : []),
+    ...(skipped.length ? ['', `已经跳过：${skipped.map((step) => step.title).join('、')}。不要擅自补做这些步骤。`] : []),
+    ...(pending.length ? ['', '剩余流程（第一项就是当前步骤）：',
+      ...pending.map((step, index) => `${index + 1}. ${step.title}${step.optional ? '（可选，按需要执行）' : ''}\n   执行要求：${operation(step)}\n   调用能力：${capabilityLabel(step)}`),
+    ] : []),
+    '', '开始执行前，请确认当前环境中确实存在上述 Skill 或已连接的服务；能力缺失时告诉我缺少哪个插件或 Skill，不要声称已经调用。素材文件、字幕文本、数据或设计链接未实际提供时，请先向我索取；不要把描述中的“已有”当作已经收到文件。',
   ];
   return lines.join('\n');
 }

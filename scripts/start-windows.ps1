@@ -1,5 +1,20 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+# Reuse the existing Windows proxy for Node's GitHub requests; credentials remain with Codex.
+if (-not $env:HTTPS_PROXY) {
+  $nextProxy = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+  if ($nextProxy.ProxyEnable -and $nextProxy.ProxyServer) {
+    $nextProxyAddress = [string]$nextProxy.ProxyServer
+    if ($nextProxyAddress -match '(?:^|;)https=([^;]+)') { $nextProxyAddress = $Matches[1] }
+    elseif ($nextProxyAddress -match '(?:^|;)http=([^;]+)') { $nextProxyAddress = $Matches[1] }
+    if ($nextProxyAddress -notmatch '[=;]') {
+      if ($nextProxyAddress -notmatch '^https?://') { $nextProxyAddress = 'http://' + $nextProxyAddress }
+      $env:HTTPS_PROXY = $nextProxyAddress
+      $env:HTTP_PROXY = $nextProxyAddress
+    }
+  }
+}
+if ($env:HTTPS_PROXY) { $env:NODE_USE_ENV_PROXY = '1'; $env:NO_PROXY = 'localhost,127.0.0.1,::1' }
 $nextRuntime = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies'
 $nextNode = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nextNode) {

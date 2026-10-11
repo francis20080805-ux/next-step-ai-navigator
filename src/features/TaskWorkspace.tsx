@@ -45,7 +45,7 @@ export function TaskWorkspace({ task, skills, bridgeStatus, bridgeUrl, preferAI,
   }
   async function copyPrompt() {
     if (!task || copying) return; setCopying(true);
-    try { await navigator.clipboard.writeText(buildCodexPrompt(task)); notify('已复制，粘贴到 Codex 的聊天框就可以继续。'); }
+    try { await navigator.clipboard.writeText(buildCodexPrompt(task, skills)); notify('已复制执行提示词和要调用的能力，粘贴到 Codex 就可以继续。'); }
     catch { setPromptOpen(true); notify('浏览器未允许自动复制，请在打开的文本中全选复制。', 'error'); }
     finally { setCopying(false); }
   }
@@ -86,6 +86,6 @@ export function TaskWorkspace({ task, skills, bridgeStatus, bridgeUrl, preferAI,
       <details className="original-request task-context"><summary>查看原始需求与补充记录</summary>{task.inputs.map((text, index) => <p key={index}>{index + 1}. {text}</p>)}</details>
     </section> : <p className="home-footnote">{bridgeStatus.connected && preferAI ? '已连接你电脑上的 Codex。' : '现在可以用本地规则安排常见任务。连接你的 Codex 后，可以理解更复杂的需求。'}</p>}
     {task ? <section className="progress-composer"><h2 className="progress-heading">补充当前进度</h2>{composer}</section> : null}
-    {task && (startOpen || promptOpen) ? <Modal title={startOpen ? '任务已经准备好' : '复制任务文本'} onClose={() => { setStartOpen(false); setPromptOpen(false); }} wide><p>复制下面的任务，粘贴到 Codex 的聊天框执行。这里会为你保存进度。</p><textarea className="prompt-text codex-prompt" aria-label="给 Codex 的任务文本" value={buildCodexPrompt(task)} readOnly onFocus={event => event.target.select()} /><div className="modal-actions"><button className="primary-button" disabled={copying} onClick={() => void copyPrompt()}><Copy size={17} />复制任务文本</button><button className="secondary-button" onClick={() => { setStartOpen(false); setPromptOpen(false); }}>回到步骤</button></div></Modal> : null}
+    {task && (startOpen || promptOpen) ? <Modal title={startOpen ? '任务已经准备好' : '复制执行提示词'} onClose={() => { setStartOpen(false); setPromptOpen(false); }} wide><p>下面已包含当前步骤的执行要求、应调用的插件或 Skill 和剩余流程。复制到 Codex 的聊天框即可继续，这里会为你保存进度。</p><textarea className="prompt-text codex-prompt" aria-label="给 Codex 的任务文本" value={buildCodexPrompt(task, skills)} readOnly onFocus={event => event.target.select()} /><div className="modal-actions"><button className="primary-button" disabled={copying} onClick={() => void copyPrompt()}><Copy size={17} />复制执行提示词</button><button className="secondary-button" onClick={() => { setStartOpen(false); setPromptOpen(false); }}>回到步骤</button></div></Modal> : null}
   </section>;
 }

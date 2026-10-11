@@ -13,6 +13,7 @@ import { StateStore } from './state.ts';
 import { taskIntentSchema, skillExplanationSchema, validateTaskIntent, validateSkillExplanation, requirementKeys, actionIds, categories, stages } from './schemas.ts';
 
 const baseDirectory = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const publicCatalogMaxBytes = 25000000;
 const defaultOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8787', 'http://localhost:8787'];
 export function validOrigin(origin: string, allowed: string[]): boolean { try { const url = new URL(origin); return url.origin === origin && allowed.includes(origin); } catch { return false; } }
 export function validHost(host: string, port: number): boolean { return host === `127.0.0.1:${port}` || host === `localhost:${port}`; }
@@ -42,10 +43,36 @@ function validateSources(value: unknown, kind: Source['kind']): Source[] {
     if (parsed.kind !== kind || item.id !== parsed.id) throw new Error('来源身份与链接不一致');
     if (item.cursor !== null && (typeof item.cursor !== 'string' || item.cursor.length > 10000000)) throw new Error('来源检查进度格式不正确');
     for (const key of ['lastCheckedAt', 'lastSuccessAt']) if (item[key] !== null && (typeof item[key] !== 'string' || !Number.isFinite(Date.parse(item[key])))) throw new Error('来源日期格式不正确');
-    return { ...parsed, enabled: item.enabled, status: item.cursor ? 'partial' : 'idle', lastCheckedAt: item.lastCheckedAt, lastSuccessAt: item.lastSuccessAt, cursor: item.cursor, snapshotSha: typeof item.snapshotSha === 'string' ? item.snapshotSha : null, skillCount: Number.isInteger(item.skillCount) && item.skillCount >= 0 ? item.skillCount : 0, error: typeof item.error === 'string' ? item.error.slice(0, 240) : null };
+    return { ...parsed, ...(Number.isSafeInteger(item.stars) && item.stars >= 0 ? { stars: item.stars } : {}), enabled: item.enabled, status: item.cursor ? 'partial' : 'idle', lastCheckedAt: item.lastCheckedAt, lastSuccessAt: item.lastSuccessAt, cursor: item.cursor, snapshotSha: typeof item.snapshotSha === 'string' ? item.snapshotSha : null, skillCount: Number.isInteger(item.skillCount) && item.skillCount >= 0 ? item.skillCount : 0, error: typeof item.error === 'string' ? item.error.slice(0, 240) : null };
   });
 }
-export interface BridgeServerOptions { statePath?: string; pairCode?: string; codex?: CodexBridge; scanner?: () => GithubSkillScanner; allowedOrigins?: string[]; serve?: boolean; }
+export function publicCatalogRequest(input: string): { url: URL; headers: Record<string, string> } {
+  const url = new URL(input);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) throw new Error('公开目录只接受 GitHub 的 HTTPS 快照链接');
+  if (url.hostname === 'api.github.com') {
+    const path = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/public\/catalog-snapshot\.json$/);
+    if (!path || url.search) throw new Error('GitHub API 快照必须使用公开仓库的 contents/public/catalog-snapshot.json 路径');
+    parseGithubSource(`https://github.com/${path[1]}/${path[2]}`);
+    return { url, headers: { Accept: 'application/vnd.github.raw+json', 'User-Agent': 'Next-Step-AI-Navigator' } };
+  }
+  if (!(url.hostname === 'raw.githubusercontent.com' || url.hostname.endsWith('.github.io'))) throw new Error('公开目录只接受 GitHub 的 HTTPS 快照链接');
+  return { url, headers: { Accept: 'application/json', 'User-Agent': 'Next-Step-AI-Navigator' } };
+}
+export async function readPublicCatalog(input: string, fetcher: typeof fetch = fetch): Promise<Skill[]> {
+  const { url, headers } = publicCatalogRequest(input);
+  const response = await fetcher(url, { headers, signal: AbortSignal.timeout(60000), redirect: 'error' });
+  if (!response.ok) throw new Error('公开目录暂时无法读取');
+  if (Number(response.headers.get('content-length') || 0) > publicCatalogMaxBytes) { await response.body?.cancel(); throw new Error('公开目录超过 25 MB，已保留现有能力'); }
+  const reader = response.body?.getReader(); if (!reader) throw new Error('公开目录内容为空');
+  const chunks: Uint8Array[] = []; let size = 0;
+  while (true) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > publicCatalogMaxBytes) { await reader.cancel(); throw new Error('公开目录超过 25 MB，已保留现有能力'); } chunks.push(part.value); }
+  const snapshot = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (snapshot.schemaVersion !== 1 || !Array.isArray(snapshot.skills)) throw new Error('公开目录格式不正确，请使用原文 JSON 快照');
+  const skills = validateCatalog(snapshot.skills, []);
+  if (skills.some(skill => skill.sourceType !== 'github' || !skill.githubUrl.startsWith('https://github.com/') || !skill.sourcePath || !skill.contentHash)) throw new Error('公开目录包含无法验证的来源');
+  return skills;
+}
+export interface BridgeServerOptions { statePath?: string; pairCode?: string; codex?: CodexBridge; scanner?: () => GithubSkillScanner; catalogFetch?: typeof fetch; allowedOrigins?: string[]; serve?: boolean; }
 export async function createBridgeServer(options: BridgeServerOptions = {}) {
   const store = new StateStore(options.statePath || join(baseDirectory, '.data', 'bridge-state.json'), seedSkills);
   await store.load();
@@ -98,8 +125,13 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
     const found: Source[] = [];
     try { found.push(...await scanner.discoverPopular()); } catch (error) { newJob('popular', 'scan', errorText(error)).status = 'paused'; }
     for (const author of store.state.authors.filter(item => item.enabled)) await discoverAuthor(author, scanner);
-    const existing = new Set(store.state.sources.map(source => source.id));
-    store.state.sources.push(...found.filter(source => !existing.has(source.id) && (existing.add(source.id), true)));
+    const existing = new Map(store.state.sources.map(source => [source.id, source]));
+    for (const source of found) {
+      const saved = existing.get(source.id);
+      if (saved) saved.stars = source.stars;
+      else { store.state.sources.push(source); existing.set(source.id, source); }
+    }
+    store.state.sources.sort((a, b) => (b.stars || 0) - (a.stars || 0));
     store.state.lastDiscoveryAt = new Date().toISOString(); await store.save();
   }
   async function discoverAuthor(author: Source, scanner = scannerFactory()) {
@@ -126,7 +158,10 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
       if (!store.state.lastDiscoveryAt || Date.now() - Date.parse(store.state.lastDiscoveryAt) >= 6 * 3600000) await discover();
       const scanner = scannerFactory();
       for (const source of store.state.sources.filter(item => item.enabled && (!item.lastCheckedAt || Date.now() - Date.parse(item.lastCheckedAt) >= 6 * 3600000)).slice(0, 8)) { await scanSource(source, scanner); const task = tasks.get(source.id); if (task) await task; if (scanner.requests >= scanner.maxRequests) break; }
-      if (store.state.settings.publicCatalogUrl) await syncPublicCatalog(store.state.settings.publicCatalogUrl);
+      const sync = store.state.publicCatalogSync;
+      const attempted = Date.parse(sync.lastAttemptAt || '') || 0, succeeded = Date.parse(sync.lastSuccessAt || '') || 0;
+      const syncDue = attempted > succeeded ? Date.now() - attempted >= 30 * 60000 : !succeeded || Date.now() - succeeded >= 6 * 3600000;
+      if (store.state.settings.publicCatalogUrl && syncDue) await syncPublicCatalog(store.state.settings.publicCatalogUrl);
       for (const skill of store.state.skills.filter(item => item.interpretationStatus === 'pending' && item.maintenanceStatus === 'active').slice(0, 20)) {
         if (!store.state.settings.automaticChecks) break;
         const job = newJob(skill.id, 'interpret', '正在解释新能力'); job.status = 'running';
@@ -138,16 +173,18 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
     finally { backgroundBusy = false; }
   }
   async function syncPublicCatalog(input: string) {
-    const url = new URL(input);
-    if (url.protocol !== 'https:' || !(url.hostname === 'raw.githubusercontent.com' || url.hostname.endsWith('.github.io')) || url.username || url.password || url.port) throw new Error('公开目录只接受 GitHub 的 HTTPS 快照链接');
-    const response = await fetch(url, { signal: AbortSignal.timeout(20000), redirect: 'error' });
-    if (!response.ok || Number(response.headers.get('content-length') || 0) > 10000000) throw new Error('公开目录暂时无法读取');
-    const text = await response.text(); if (text.length > 10000000) throw new Error('公开目录太大');
-    const snapshot = JSON.parse(text); const skills = validateCatalog(snapshot.skills, []);
-    if (skills.some(skill => skill.sourceType !== 'github' || !skill.githubUrl.startsWith('https://github.com/') || !skill.sourcePath || !skill.contentHash)) throw new Error('公开目录包含无法验证的来源');
-    store.upsertSkills(skills); await store.save();
+    const sync = store.state.publicCatalogSync, job = newJob('public-catalog', 'scan', '正在同步公共能力目录');
+    sync.lastAttemptAt = new Date().toISOString(); job.status = 'running'; await store.save();
+    try {
+      const skills = await readPublicCatalog(input, options.catalogFetch);
+      store.upsertSkills(skills); sync.lastSuccessAt = new Date().toISOString(); sync.error = null;
+      job.status = 'completed'; job.processed = skills.length; job.total = skills.length; job.message = '公共能力目录已同步';
+    } catch (error) {
+      sync.error = errorText(error); job.status = 'paused'; job.message = `${sync.error}；保留现有能力，30 分钟后重试`;
+    } finally { job.updatedAt = new Date().toISOString(); await store.save(); }
   }
   const server = createServer(async (request, response) => {
+    response.setHeader('Referrer-Policy', 'same-origin');
     const port = (server.address() as { port: number } | null)?.port || 8787;
     if (!validHost(request.headers.host || '', port)) return send(response, 403, { error: '本机服务拒绝了不正确的访问地址' });
     let url: URL;
@@ -179,8 +216,8 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
       if (request.method === 'GET' && url.pathname === '/api/catalog') return send(response, 200, store.state.skills);
       if (request.method === 'GET' && url.pathname === '/api/jobs') return send(response, 200, store.state.jobs);
       if (request.method === 'GET' && url.pathname === '/api/backup') {
-        const { skills, sources, authors, jobs, settings, lastDiscoveryAt } = store.state;
-        return send(response, 200, { schemaVersion: 1, kind: 'ai-navigator-bridge-backup', exportedAt: new Date().toISOString(), skills, sources, authors, jobs, settings, lastDiscoveryAt });
+        const { skills, sources, authors, jobs, settings, lastDiscoveryAt, publicCatalogSync } = store.state;
+        return send(response, 200, { schemaVersion: 1, kind: 'ai-navigator-bridge-backup', exportedAt: new Date().toISOString(), skills, sources, authors, jobs, settings, lastDiscoveryAt, publicCatalogSync });
       }
       if (request.method === 'POST' && url.pathname === '/api/backup/restore') {
         if (tasks.size || backgroundBusy) return send(response, 409, { error: '本机正在检查能力，请等待结束再恢复备份' });
@@ -189,14 +226,18 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
         const skills = validateCatalog(backup.skills, []), sources = validateSources(backup.sources, 'repository'), authors = validateSources(backup.authors, 'author');
         if (!Array.isArray(backup.jobs) || backup.jobs.length > 100 || backup.jobs.some((job: any) => !job || typeof job.id !== 'string' || typeof job.sourceId !== 'string' || typeof job.message !== 'string' || !['scan', 'interpret'].includes(job.kind) || !['queued', 'running', 'completed', 'failed', 'paused'].includes(job.status) || !Number.isInteger(job.processed) || job.processed < 0 || !Number.isInteger(job.total) || job.total < 0 || typeof job.createdAt !== 'string' || !Number.isFinite(Date.parse(job.createdAt)) || typeof job.updatedAt !== 'string' || !Number.isFinite(Date.parse(job.updatedAt)))) throw new Error('检查记录格式不正确');
         if (!backup.settings || typeof backup.settings.automaticChecks !== 'boolean' || typeof backup.settings.publicCatalogUrl !== 'string') throw new Error('本机设置格式不正确');
-        if (backup.settings.publicCatalogUrl) { const url = new URL(backup.settings.publicCatalogUrl); if (url.protocol !== 'https:' || !(url.hostname === 'raw.githubusercontent.com' || url.hostname.endsWith('.github.io')) || url.port || url.username || url.password) throw new Error('备份中的公开目录链接不正确'); }
+        if (backup.settings.publicCatalogUrl) publicCatalogRequest(backup.settings.publicCatalogUrl);
+        const publicCatalogSync = backup.publicCatalogSync === undefined ? { lastAttemptAt: null, lastSuccessAt: null, error: null } : backup.publicCatalogSync;
+        if (!publicCatalogSync || typeof publicCatalogSync !== 'object' || Array.isArray(publicCatalogSync)) throw new Error('公共目录同步状态格式不正确');
+        for (const key of ['lastAttemptAt', 'lastSuccessAt']) if (publicCatalogSync[key] !== null && (typeof publicCatalogSync[key] !== 'string' || !Number.isFinite(Date.parse(publicCatalogSync[key])))) throw new Error('公共目录同步日期格式不正确');
+        if (publicCatalogSync.error !== null && (typeof publicCatalogSync.error !== 'string' || publicCatalogSync.error.length > 240)) throw new Error('公共目录同步状态格式不正确');
         const jobs: ScanJob[] = backup.jobs.map((job: ScanJob) => ({ id: job.id, sourceId: job.sourceId, kind: job.kind, processed: job.processed, total: job.total, createdAt: job.createdAt, updatedAt: job.updatedAt, status: ['running', 'queued'].includes(job.status) ? 'paused' : job.status, message: ['running', 'queued'].includes(job.status) ? '已从备份恢复，等待继续' : job.message.slice(0, 240) }));
-        Object.assign(store.state, { skills, sources, authors, jobs, settings: { automaticChecks: backup.settings.automaticChecks, publicCatalogUrl: backup.settings.publicCatalogUrl }, lastDiscoveryAt: typeof backup.lastDiscoveryAt === 'string' && Number.isFinite(Date.parse(backup.lastDiscoveryAt)) ? backup.lastDiscoveryAt : null });
+        Object.assign(store.state, { skills, sources, authors, jobs, settings: { automaticChecks: backup.settings.automaticChecks, publicCatalogUrl: backup.settings.publicCatalogUrl }, lastDiscoveryAt: typeof backup.lastDiscoveryAt === 'string' && Number.isFinite(Date.parse(backup.lastDiscoveryAt)) ? backup.lastDiscoveryAt : null, publicCatalogSync: { lastAttemptAt: publicCatalogSync.lastAttemptAt, lastSuccessAt: publicCatalogSync.lastSuccessAt, error: publicCatalogSync.error } });
         await store.save(); return send(response, 200, { restored: true, skillCount: skills.length, sourceCount: sources.length, authorCount: authors.length });
       }
       if (url.pathname === '/api/settings') {
         if (request.method === 'GET') return send(response, 200, store.state.settings);
-        if (request.method === 'PATCH') { const value = await body(request); if (typeof value.automaticChecks === 'boolean') store.state.settings.automaticChecks = value.automaticChecks; if (typeof value.publicCatalogUrl === 'string') { if (value.publicCatalogUrl) { const parsed = new URL(value.publicCatalogUrl); if (parsed.protocol !== 'https:' || !(parsed.hostname === 'raw.githubusercontent.com' || parsed.hostname.endsWith('.github.io'))) throw new Error('公开目录只接受 GitHub 快照链接'); } store.state.settings.publicCatalogUrl = value.publicCatalogUrl; } await store.save(); return send(response, 200, store.state.settings); }
+        if (request.method === 'PATCH') { const value = await body(request); if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl) publicCatalogRequest(value.publicCatalogUrl); if (typeof value.automaticChecks === 'boolean') store.state.settings.automaticChecks = value.automaticChecks; if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl !== store.state.settings.publicCatalogUrl) { store.state.settings.publicCatalogUrl = value.publicCatalogUrl; store.state.publicCatalogSync = { lastAttemptAt: null, lastSuccessAt: null, error: null }; } await store.save(); return send(response, 200, store.state.settings); }
       }
       if (url.pathname === '/api/tasks/interpret' && request.method === 'POST') {
         const value = await body(request);
@@ -238,7 +279,7 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
         if (path !== dist && !path.startsWith(dist + sep)) return send(response, 403, { error: '访问路径不正确' });
         try { if (!(await stat(path)).isFile()) path = join(dist, 'index.html'); } catch { path = join(dist, 'index.html'); }
         const contents = await readFile(path); const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' };
-        response.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }); return response.end(contents);
+        response.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); return response.end(contents);
       }
       send(response, 404, { error: '没有这个操作' });
     } catch (error) { send(response, 400, { error: errorText(error) }); }

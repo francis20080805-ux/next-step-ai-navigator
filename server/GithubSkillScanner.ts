@@ -131,16 +131,16 @@ export class GithubSkillScanner {
       return { source: { ...source, status: complete ? 'complete' : 'partial', cursor: complete ? null : Buffer.from(JSON.stringify(cursor)).toString('base64url'), snapshotSha: cursor.sha, lastCheckedAt: now(), lastSuccessAt: complete ? now() : source.lastSuccessAt, skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, error: null }, skills: found, complete, processed, total: files.length };
     } catch (error) {
       const partial = Boolean(cursor);
-      return { source: { ...source, status: partial ? 'partial' : 'error', lastCheckedAt: now(), snapshotSha: cursor?.sha || source.snapshotSha, cursor: cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : source.cursor, error: error instanceof Error ? error.message : '检查失败' }, skills: found, complete: false, processed, total: cursor?.files.filter(entry => /(^|\/)skill\.md$/i.test(entry.path)).length || 0 };
+      return { source: { ...source, status: partial ? 'partial' : 'error', lastCheckedAt: now(), skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, snapshotSha: cursor?.sha || source.snapshotSha, cursor: cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : source.cursor, error: error instanceof Error ? error.message : '检查失败' }, skills: found, complete: false, processed, total: cursor?.files.filter(entry => /(^|\/)skill\.md$/i.test(entry.path)).length || 0 };
     }
   }
   async discoverPopular(): Promise<Source[]> {
     const sources: Source[] = [];
     for (const query of popularQueries) {
       const result = await this.request(`/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=100`);
-      for (const repo of result.items || []) if (!repo.fork && !repo.archived && !repo.private) sources.push(parseGithubSource(repo.html_url));
+      for (const repo of result.items || []) if (!repo.fork && !repo.archived && !repo.private) sources.push({ ...parseGithubSource(repo.html_url), stars: Number.isSafeInteger(repo.stargazers_count) && repo.stargazers_count >= 0 ? repo.stargazers_count : 0 });
     }
-    return [...new Map(sources.map(source => [source.id, source])).values()];
+    return [...new Map(sources.map(source => [source.id, source])).values()].sort((a, b) => (b.stars || 0) - (a.stars || 0));
   }
   async discoverAuthor(author: Source): Promise<{ sources: Source[]; cursor: string | null }> {
     const user = await this.request(`/users/${author.owner}`);

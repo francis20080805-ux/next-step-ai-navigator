@@ -1,5 +1,5 @@
 import type { AppData } from '../domain/types.ts';
-export const defaultData = (): AppData => ({ schemaVersion: 1, tasks: [], skills: [], favoriteSkillIds: [], settings: { preferAI: true, automaticChecks: true, bridgeUrl: 'http://127.0.0.1:8787', publicCatalogUrl: '' } });
+export const defaultData = (): AppData => ({ schemaVersion: 1, tasks: [], skills: [], favoriteSkillIds: [], settings: { preferAI: true, automaticChecks: true, bridgeUrl: 'http://127.0.0.1:8787', publicCatalogUrl: 'https://api.github.com/repos/francis20080805-ux/next-step-ai-navigator/contents/public/catalog-snapshot.json' } });
 let dbPromise: Promise<IDBDatabase> | undefined;
 function database() {
   return dbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {

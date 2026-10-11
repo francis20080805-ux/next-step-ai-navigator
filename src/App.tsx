@@ -65,9 +65,11 @@ export default function App() {
   const refreshPublic = useCallback(async (value: string) => {
     const url = new URL(value, location.href);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('请填写有效的公共能力库网页地址。');
-    const response = await fetch(url.href, { signal: AbortSignal.timeout(15000) });
+    const response = await fetch(url.href, { signal: AbortSignal.timeout(60000), ...(url.hostname === 'api.github.com' ? { headers: { Accept: 'application/vnd.github.raw+json' } } : {}) });
     if (!response.ok) throw new Error(`公共能力库暂时无法读取（${response.status}）。`);
-    const raw = await response.json() as unknown;
+    const rawText = await response.text();
+    if (new TextEncoder().encode(rawText).byteLength > 25 * 1024 * 1024) throw new Error('公共能力库超过 25 MB，无法导入。');
+    const raw = JSON.parse(rawText) as unknown;
     const skills = Array.isArray(raw) ? raw : (raw as { skills?: unknown })?.skills;
     const validated = validateBackup({ ...defaultData(), skills });
     setData(current => ({ ...current, skills: mergeSkills(current.skills, validated.skills) }));

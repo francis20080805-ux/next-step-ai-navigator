@@ -132,6 +132,21 @@ export function planWorkflowFromIntent(input: string, intent: TaskIntent, previo
       completedActions: [...new Set([...previous.intent.completedActions, ...intent.completedActions])],
     };
   }
+  if (previous && intent.category === 'video' && previous.steps.some((step) => step.action === 'video.create' || step.action === 'video.materials') && positiveMatch(/(?:视频|短片).{0,10}(?:已经|已)?(?:做好|做完|完成)|(?:已经|已)(?:做好|完成).{0,5}(?:视频|短片)/, input)) {
+    const materialEdit = input.split(/[，,。；;\n]/).some((clause) => [...clause.matchAll(/(?:加(?:上)?|添加|更换|替换|换|调整|修改|删|裁剪).{0,10}(?:音乐|配乐|BGM|背景音|素材|图片|照片|顺序|节奏|视频|片段|画面)|重新剪辑|剪辑|剪视频/gi)].some((match) => {
+      const prefix = clause.slice(0, match.index);
+      const suffix = clause.slice((match.index ?? 0) + match[0].length);
+      return !/(?:不要|不需要|不用|无需|别|不)(?:再|继续)?\s*$/.test(prefix) && !/^(?:已经|已)?(?:完成|做好|做完|好了)/.test(suffix);
+    }));
+    const completedActions = new Set(intent.completedActions);
+    completedActions.add('video.create');
+    if (materialEdit) {
+      completedActions.delete('video.materials');
+      previous = { ...previous, steps: previous.steps.map((step) => step.action === 'video.materials' ? { ...step, status: 'pending' } : step) };
+      intent = { ...intent, subtype: '剪辑', requirements: { ...intent.requirements, onlyCaptions: 'excluded' } };
+    } else if (previous.steps.some((step) => step.action === 'video.materials')) completedActions.add('video.materials');
+    intent = { ...intent, hasExistingOutput: true, completedActions: [...completedActions] };
+  }
   const steps = planWorkflow(intent, catalog, previous);
   if (!steps.length) throw new Error('暂时还无法拆解这个任务，请补充最后想得到什么。');
   const previousTitle = previous?.title && previous.title !== previous.originalInput && previous.title.length <= 24 ? previous.title : undefined;

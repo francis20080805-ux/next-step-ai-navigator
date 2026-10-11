@@ -11,8 +11,10 @@ try { playwright = require('playwright'); }
 catch { playwright = require(path.join(process.env.USERPROFILE ?? process.env.HOME ?? '', '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
 const { chromium } = playwright;
 const output = process.env.NEXTSTEP_QA_OUTPUT ?? path.resolve('.data/qa');
-const base = 'http://127.0.0.1:5173';
+const base = process.env.NEXTSTEP_QA_URL ?? 'http://127.0.0.1:5173';
 const pairCode = process.argv.find(value => value.startsWith('--pair-code='))?.split('=')[1];
+const bridgeOnly = process.argv.includes('--bridge-only');
+const publicOnly = process.argv.includes('--public-only');
 await mkdir(output, { recursive: true });
 const edge = path.join(process.env['ProgramFiles(x86)'] ?? process.env.ProgramFiles ?? '', 'Microsoft/Edge/Application/msedge.exe');
 const browser = await chromium.launch({ headless: true, ...(existsSync(edge) ? { executablePath: edge } : {}) });
@@ -41,6 +43,41 @@ async function dbState() {
 async function waitForSave(test) { await page.waitForFunction(async testSource => { const test = new Function('data', `return (${testSource})(data)`); const request = indexedDB.open('next-step-navigator', 1); return new Promise(resolve => { request.onsuccess = () => { const db = request.result; const read = db.transaction('app').objectStore('app').get('state'); read.onsuccess = () => { resolve(test(read.result)); db.close(); }; }; request.onerror = () => resolve(false); }); }, test.toString()); }
 
 try {
+  if (publicOnly) {
+    const catalogUrl = 'https://api.github.com/repos/francis20080805-ux/next-step-ai-navigator/contents/public/catalog-snapshot.json';
+    let snapshotSkills;
+    await check('真实GitHub公共目录以raw JSON导入', async () => {
+      const pending = page.waitForResponse(response => response.url() === catalogUrl, { timeout: 20000 });
+      await route('home'); const response = await pending; assert.equal(response.status(), 200); assert.equal(response.request().headers().accept, 'application/vnd.github.raw+json'); const snapshot = JSON.parse(await response.text()); snapshotSkills = Array.isArray(snapshot) ? snapshot : snapshot.skills; assert.ok(Array.isArray(snapshotSkills) && snapshotSkills.length > 0); await waitForSave(data => data?.skills.some(skill => skill.sourceType === 'github')); const saved = await dbState(); assert.ok(snapshotSkills.every(skill => saved.skills.some(savedSkill => savedSkill.id === skill.id))); console.log(`PUBLIC_GITHUB_SKILLS_IMPORTED ${snapshotSkills.length}`); await route('library'); await screenshot('desktop-public-catalog');
+    });
+    await check('普通目录地址不携带GitHub raw header', async () => {
+      let accept;
+      await page.route('https://catalog.example.test/skills.json', async interception => { accept = interception.request().headers().accept; await interception.fulfill({ status: 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': base }, body: JSON.stringify({ skills: snapshotSkills.slice(0, 1) }) }); });
+      await route('settings'); await page.getByText('高级设置', { exact: true }).click(); await page.getByRole('textbox', { name: '公共能力库地址', exact: true }).fill('https://catalog.example.test/skills.json'); await page.getByRole('button', { name: '获取最新能力库', exact: true }).click(); await page.getByRole('status').filter({ hasText: '公共能力库已更新' }).waitFor(); assert.notEqual(accept, 'application/vnd.github.raw+json');
+    });
+    await check('超过25MB的公共目录拒绝导入且原数据不变', async () => {
+      const before = (await dbState()).skills.length; await page.route('https://catalog.example.test/too-large.json', interception => interception.fulfill({ status: 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': base }, body: ' '.repeat(25 * 1024 * 1024 + 1) })); await page.getByRole('textbox', { name: '公共能力库地址', exact: true }).fill('https://catalog.example.test/too-large.json'); await page.getByRole('button', { name: '获取最新能力库', exact: true }).click(); await page.locator('.settings-page .error-message').waitFor(); assert.match(await page.locator('.settings-page .error-message').innerText(), /25 MB/); assert.equal((await dbState()).skills.length, before);
+    });
+  } else if (bridgeOnly) {
+    assert.ok(pairCode, '--bridge-only requires a fresh --pair-code');
+    await check('备份测试保留一个真实本地任务', async () => {
+      await route('home'); await page.getByRole('textbox', { name: '你今天想让 AI 帮你做什么？' }).fill('我已经有视频，只想给视频加字幕。'); await page.getByRole('button', { name: '帮我安排下一步' }).click(); await page.locator('.workflow').waitFor(); await waitForSave(data => data?.tasks.length === 1); await route('settings'); await page.getByRole('switch', { name: /优先使用 AI/ }).uncheck();
+    });
+    await check('真实本机服务配对与来源读取', async () => {
+      await page.getByRole('textbox', { name: '连接码', exact: true }).fill(pairCode); await page.getByRole('button', { name: '连接 Codex', exact: true }).click(); await page.getByText('AI 已连接', { exact: true }).waitFor(); console.log('PAIR_CODE_CONSUMED'); await route('sources'); await page.getByRole('heading', { name: '已添加的仓库', exact: true }).waitFor(); await page.waitForTimeout(250); await screenshot('desktop-sources-connected'); await route('settings');
+    });
+    let bridgeBackup; let bridgePath;
+    await check('真实本机目录导出与恢复，不改变浏览器任务', async () => {
+      await page.getByText('高级设置', { exact: true }).click(); const pending = page.waitForEvent('download'); await page.getByRole('button', { name: '导出本机目录', exact: true }).click(); const download = await pending; bridgePath = path.join(output, 'qa-bridge-backup.json'); await download.saveAs(bridgePath); bridgeBackup = JSON.parse(await readFile(bridgePath, 'utf8')); assert.equal(bridgeBackup.kind, 'ai-navigator-bridge-backup'); assert.equal('token' in bridgeBackup, false); assert.equal('code' in bridgeBackup, false);
+      await page.getByLabel('选择本机目录备份文件', { exact: true }).setInputFiles(bridgePath); await page.getByRole('status').filter({ hasText: '本机目录已恢复' }).waitFor(); assert.equal((await dbState()).tasks.length, 1); console.log('REAL_BRIDGE_BACKUP_RESTORE_PASS'); await screenshot('desktop-bridge-backup');
+    });
+    await check('恶意来源备份被服务端拒绝，目录与任务不变', async () => {
+      const malicious = { ...bridgeBackup, sources: [{ id: 'qa-malicious', url: 'https://example.com/private', owner: 'qa-owner', repo: 'qa-repo', name: '拒绝非 GitHub 地址', kind: 'repository', enabled: true, status: 'idle', lastCheckedAt: null, lastSuccessAt: null, skillCount: 0, error: null, cursor: null, snapshotSha: null }] };
+      await page.getByLabel('选择本机目录备份文件', { exact: true }).setInputFiles({ name: 'invalid-bridge-source.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(malicious)) }); await page.locator('.settings-page .error-message').waitFor(); assert.match(await page.locator('.settings-page .error-message').innerText(), /GitHub|来源|地址|无效/i); await screenshot('desktop-bridge-backup-rejected');
+      const pending = page.waitForEvent('download'); await page.getByRole('button', { name: '导出本机目录', exact: true }).click(); const download = await pending; const afterPath = path.join(output, 'qa-bridge-after-rejected.json'); await download.saveAs(afterPath); const after = JSON.parse(await readFile(afterPath, 'utf8')); assert.deepEqual(after.sources, bridgeBackup.sources); assert.deepEqual(after.authors, bridgeBackup.authors); assert.deepEqual(after.skills, bridgeBackup.skills); assert.equal((await dbState()).tasks.length, 1);
+      await page.getByRole('button', { name: '断开连接', exact: true }).click(); await page.getByRole('button', { name: '连接 Codex', exact: true }).waitFor();
+    });
+  } else {
   await check('页面身份、首页非空、无预置假任务', async () => {
     await route('home'); assert.match(await page.title(), /下一步/); assert.equal(await page.locator('h1').innerText(), '你今天想让 AI 帮你做什么？'); assert.equal(await page.locator('.workflow').count(), 0); assert.equal(await page.locator('vite-error-overlay').count(), 0); await screenshot('desktop-home-empty');
   });
@@ -132,6 +169,7 @@ try {
     await page.getByLabel('选择本机目录备份文件', { exact: true }).setInputFiles(backupPath); await page.locator('.settings-page .error-message').waitFor(); assert.match(await page.locator('.settings-page .error-message').innerText(), /本机目录备份/); assert.equal(restoredBridge, 0);
     await page.getByLabel('选择本机目录备份文件', { exact: true }).setInputFiles(fixturePath); await page.getByRole('status').filter({ hasText: '本机目录已恢复' }).waitFor(); assert.equal(restoredBridge, 1); assert.equal((await dbState()).tasks.length, 2);
   });
+  }
   assert.equal(pageErrors.length, 0, pageErrors.join('\n'));
   console.log(JSON.stringify({ checks, pageErrors, consoleErrors, failedResponses, screenshotDirectory: output }, null, 2));
 } finally { await context.close(); await browser.close(); }

@@ -1,20 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
-import { createBridgeServer, validHost, validOrigin } from '../server/index.ts';
+import { createBridgeServer, validHost, validOrigin, publicCatalogRequest, readPublicCatalog } from '../server/index.ts';
 import { CodexBridge, codexArgs, parseCodexEvents } from '../server/CodexBridge.ts';
 import { GithubSkillScanner, parseGithubSource } from '../server/GithubSkillScanner.ts';
 import { validateTaskIntent, validateSkillExplanation } from '../server/schemas.ts';
 import { seedSkills } from '../src/data/seedSkills.ts';
-import { StateStore } from '../server/state.ts';
+import { StateStore, defaultPublicCatalogUrl } from '../server/state.ts';
 
 class LocalCodex extends CodexBridge {
   override async status() { return { codexAvailable: true, authMode: 'none' as const, message: '本机未登录' }; }
-  override async interpret(): Promise<unknown> { throw new Error('本机未登录'); }
+  override async interpret(_prompt: string, _schema: unknown, _priority?: 'foreground' | 'background'): Promise<unknown> { throw new Error('本机未登录'); }
 }
 test('bridge requires allowed Origin, loopback Host, one-use pairing and memory-only token', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'navigator-server-test-'));
@@ -51,6 +51,21 @@ test('origin and Github URLs have exact allowlists', () => {
   assert.equal(validHost('127.0.0.1:8787', 8787), true); assert.equal(validHost('0.0.0.0:8787', 8787), false);
   for (const url of ['https://github.com.evil.example/openai/plugins', 'https://a:b@github.com/openai/plugins', 'http://github.com/openai/plugins', 'https://github.com/openai/plugins?url=evil', 'https://github.com/openai/plugins/tree/main']) assert.throws(() => parseGithubSource(url));
   assert.equal(parseGithubSource('https://github.com/openai/plugins').kind, 'repository'); assert.equal(parseGithubSource('https://github.com/remotion-dev').kind, 'author');
+});
+test('local static pages preserve same-origin Referer without weakening explicit Origin validation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-origin-test-'));
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), codex: new LocalCodex(), serve: true });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const base = `http://127.0.0.1:${(bridge.server.address() as { port: number }).port}`;
+  try {
+    const response = await fetch(base + '/api/status', { headers: { Origin: base } }); assert.equal(response.status, 200); assert.equal(response.headers.get('referrer-policy'), 'same-origin'); await response.json();
+    const sameOrigin = { 'Sec-Fetch-Site': 'same-origin', Referer: base + '/settings' };
+    assert.equal((await fetch(base + '/api/status', { headers: sameOrigin })).status, 200);
+    assert.equal((await fetch(base + '/api/status', { headers: { ...sameOrigin, Origin: 'https://evil.example' } })).status, 403);
+    assert.equal((await fetch(base + '/api/status', { headers: { ...sameOrigin, Referer: 'https://evil.example/' } })).status, 403);
+    assert.equal((await fetch(base + '/api/status', { headers: { ...sameOrigin, 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+    assert.equal((await fetch(base + '/api/status', { headers: { 'Sec-Fetch-Site': 'same-origin' } })).status, 403);
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
 });
 test('Codex invocation limits provider, tools, sandbox and stdin', () => {
   const args = codexArgs('/safe/schema.json', '/empty');
@@ -89,6 +104,75 @@ test('same-content public snapshots preserve local explanations while changed do
   store.upsertSkills([{ ...original, contentHash: 'two', interpretationStatus: 'pending', chineseName: '内容已更新' }]);
   assert.equal(store.state.skills[0].interpretationStatus, 'pending'); assert.equal(store.state.skills[0].chineseName, '内容已更新');
 });
+test('public snapshot API only accepts raw JSON at the precise contents path without authentication', async () => {
+  const request = publicCatalogRequest(defaultPublicCatalogUrl);
+  assert.equal(request.url.hostname, 'api.github.com'); assert.equal(request.headers.Accept, 'application/vnd.github.raw+json'); assert.equal('Authorization' in request.headers, false);
+  for (const url of ['https://api.github.com.evil.example/repos/a/b/contents/public/catalog-snapshot.json', 'https://api.github.com/users/a', 'https://api.github.com/repos/a/b/contents/auth.json', defaultPublicCatalogUrl + '?ref=main', defaultPublicCatalogUrl + '#data', defaultPublicCatalogUrl.replace('https://', 'https://secret@')]) assert.throws(() => publicCatalogRequest(url));
+  const snapshotSkill = { ...seedSkills[0], id: 'github:42:tools/SKILL.md', sourceType: 'github' as const, sourcePath: 'tools/SKILL.md', githubUrl: 'https://github.com/example/skills/blob/fixed/tools/SKILL.md', contentHash: 'one', interpretationStatus: 'pending' as const };
+  const fetcher: typeof fetch = async (input, options) => { assert.equal(String(input), defaultPublicCatalogUrl); assert.equal(new Headers(options?.headers).get('accept'), 'application/vnd.github.raw+json'); assert.equal(new Headers(options?.headers).has('authorization'), false); assert.equal(options?.redirect, 'error'); return json({ schemaVersion: 1, skills: [snapshotSkill] }); };
+  assert.equal((await readPublicCatalog(defaultPublicCatalogUrl, fetcher))[0].id, snapshotSkill.id);
+  await assert.rejects(readPublicCatalog(defaultPublicCatalogUrl, async () => json({ name: 'catalog-snapshot.json', encoding: 'base64', content: 'fake' })), /原文 JSON/);
+  await assert.rejects(readPublicCatalog(defaultPublicCatalogUrl, async () => json({}, 200, { 'Content-Length': '25000001' })), /25 MB/);
+});
+test('public catalog accepts a real-sized snapshot and bounds headerless streaming bodies at 25 MB', async () => {
+  const skill = { ...seedSkills[0], id: 'github:42:tools/SKILL.md', sourceType: 'github' as const, sourcePath: 'tools/SKILL.md', githubUrl: 'https://github.com/example/skills/blob/fixed/tools/SKILL.md', contentHash: 'one', interpretationStatus: 'pending' as const };
+  const large = JSON.stringify({ schemaVersion: 1, skills: [skill], cursor: 'x'.repeat(14180000) });
+  assert.equal((await readPublicCatalog(defaultPublicCatalogUrl, async () => new Response(large)))[0].id, skill.id);
+  let cancelled = false;
+  const oversized = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(12500000)); controller.enqueue(new Uint8Array(12500001)); }, cancel() { cancelled = true; } });
+  await assert.rejects(readPublicCatalog(defaultPublicCatalogUrl, async () => new Response(oversized)), /25 MB/);
+  assert.equal(cancelled, true);
+});
+test('empty legacy snapshot settings migrate to the published anonymous API URL', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-default-test-')), path = join(directory, 'state.json');
+  try {
+    const original = new StateStore(path, seedSkills); assert.equal(original.state.settings.publicCatalogUrl, defaultPublicCatalogUrl);
+    original.state.settings.publicCatalogUrl = ''; original.state.settings.automaticChecks = false;
+    const legacy: any = structuredClone(original.state); delete legacy.publicCatalogSync;
+    await writeFile(path, JSON.stringify(legacy));
+    const loaded = new StateStore(path, seedSkills); await loaded.load(); assert.equal(loaded.state.settings.publicCatalogUrl, defaultPublicCatalogUrl); assert.equal(loaded.state.settings.automaticChecks, false);
+    assert.deepEqual(loaded.state.publicCatalogSync, { lastAttemptAt: null, lastSuccessAt: null, error: null });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('API snapshot pending skills enter background interpretation and unchanged snapshots reuse ready results', async () => {
+  class SnapshotCodex extends LocalCodex {
+    priorities: string[] = [];
+    override async interpret(_prompt: string, _schema: unknown, priority?: 'foreground' | 'background') { this.priorities.push(priority || 'foreground'); return { chineseName: '整理表格', simpleDescription: '帮你整理表格数据', category: 'spreadsheet', tags: [], userPhrases: [], taskTypes: ['spreadsheet'], stage: 'edit', required: false, conditions: [], excludeConditions: [], prerequisites: [], nextSkills: [] }; }
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-snapshot-test-')), codex = new SnapshotCodex();
+  const skill = { ...seedSkills[0], id: 'github:42:tools/SKILL.md', sourceType: 'github' as const, sourcePath: 'tools/SKILL.md', githubUrl: 'https://github.com/example/skills/blob/fixed/tools/SKILL.md', contentHash: 'one', interpretationStatus: 'pending' as const };
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), codex, catalogFetch: async () => json({ schemaVersion: 1, skills: [skill] }) });
+  try {
+    bridge.store.state.sources = []; bridge.store.state.lastDiscoveryAt = new Date().toISOString();
+    await bridge.tick(); assert.deepEqual(codex.priorities, ['background']); assert.equal(bridge.store.state.skills.find(item => item.id === skill.id)?.interpretationStatus, 'ready');
+    bridge.store.state.publicCatalogSync = { lastAttemptAt: new Date(Date.now() - 7 * 3600000).toISOString(), lastSuccessAt: new Date(Date.now() - 7 * 3600000).toISOString(), error: null };
+    await bridge.tick(); assert.deepEqual(codex.priorities, ['background']); assert.equal(bridge.store.state.skills.find(item => item.id === skill.id)?.chineseName, '整理表格');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('failed public sync continues interpretation and retries after 30 minutes; successful sync waits six hours across restarts', async () => {
+  class QueueCodex extends LocalCodex {
+    calls = 0;
+    override async interpret() { this.calls++; return { chineseName: '整理表格', simpleDescription: '帮你整理表格数据', category: 'spreadsheet', tags: [], userPhrases: [], taskTypes: ['spreadsheet'], stage: 'edit', required: false, conditions: [], excludeConditions: [], prerequisites: [], nextSkills: [] }; }
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-sync-test-')), path = join(directory, 'state.json'), codex = new QueueCodex();
+  let requests = 0, failing = true;
+  const catalogFetch: typeof fetch = async () => { requests++; if (failing) throw new Error('公开目录网络中断'); return json({ schemaVersion: 1, skills: [] }); };
+  const bridge = await createBridgeServer({ statePath: path, codex, catalogFetch });
+  try {
+    bridge.store.state.sources = []; bridge.store.state.lastDiscoveryAt = new Date().toISOString();
+    bridge.store.state.skills = [{ ...seedSkills[0], id: 'import-pending', contentHash: 'pending-one', interpretationStatus: 'pending' }];
+    await bridge.tick(); assert.equal(requests, 1); assert.equal(codex.calls, 1); assert.equal(bridge.store.state.skills[0].interpretationStatus, 'ready');
+    assert.ok(bridge.store.state.publicCatalogSync.lastAttemptAt); assert.equal(bridge.store.state.publicCatalogSync.lastSuccessAt, null); assert.match(bridge.store.state.publicCatalogSync.error || '', /网络中断/);
+    await bridge.tick(); assert.equal(requests, 1);
+    bridge.store.state.publicCatalogSync.lastAttemptAt = new Date(Date.now() - 31 * 60000).toISOString(); failing = false;
+    await bridge.tick(); assert.equal(requests, 2); assert.ok(bridge.store.state.publicCatalogSync.lastSuccessAt); assert.equal(bridge.store.state.publicCatalogSync.error, null);
+    const restarted = await createBridgeServer({ statePath: path, codex, catalogFetch });
+    assert.deepEqual(restarted.store.state.publicCatalogSync, bridge.store.state.publicCatalogSync);
+    await restarted.tick(); assert.equal(requests, 2);
+    const old = new Date(Date.now() - 7 * 3600000).toISOString(); restarted.store.state.publicCatalogSync = { lastAttemptAt: old, lastSuccessAt: old, error: null };
+    await restarted.tick(); assert.equal(requests, 3); assert.equal(codex.calls, 1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 test('paired bridge backups round-trip original data without credentials or resetting usage', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'navigator-backup-test-'));
   const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), pairCode: '123456', codex: new LocalCodex() });
@@ -101,6 +185,7 @@ test('paired bridge backups round-trip original data without credentials or rese
     const authorized = { ...headers, Authorization: `Bearer ${paired.token}` };
     const time = new Date().toISOString();
     bridge.store.state.aiUsage = { day: '2026-10-10', count: 20, pausedUntil: 0, message: '' };
+    bridge.store.state.publicCatalogSync = { lastAttemptAt: time, lastSuccessAt: time, error: null };
     bridge.store.state.jobs = [{ id: 'saved-job', sourceId: bridge.store.state.sources[0].id, kind: 'scan', status: 'running', message: '正在检查', processed: 1, total: 2, createdAt: time, updatedAt: time }];
     bridge.store.state.authors = [parseGithubSource('https://github.com/remotion-dev')];
     const backup = await (await fetch(`${base}/api/backup`, { headers: authorized })).json();
@@ -111,9 +196,12 @@ test('paired bridge backups round-trip original data without credentials or rese
     const restored = await fetch(`${base}/api/backup/restore`, { method: 'POST', headers: authorized, body: JSON.stringify({ backup }) });
     assert.equal(restored.status, 200); assert.equal((await restored.json()).restored, true);
     assert.equal(bridge.store.state.skills.length, seedSkills.length); assert.equal(bridge.store.state.authors.length, 1); assert.equal(bridge.store.state.jobs[0].status, 'paused'); assert.equal(bridge.store.state.aiUsage.count, 20);
+    assert.deepEqual(bridge.store.state.publicCatalogSync, backup.publicCatalogSync);
     assert.equal((await fetch(`${base}/api/backup/restore`, { method: 'POST', headers: authorized, body: JSON.stringify({ backup: { ...backup, schemaVersion: 999 } }) })).status, 400);
     const invalid = structuredClone(backup); invalid.sources[0].url = 'https://evil.example/private';
     assert.equal((await fetch(`${base}/api/backup/restore`, { method: 'POST', headers: authorized, body: JSON.stringify({ backup: invalid }) })).status, 400);
+    const invalidSync = { ...backup, publicCatalogSync: { lastAttemptAt: 'not-a-date', lastSuccessAt: null, error: null } };
+    assert.equal((await fetch(`${base}/api/backup/restore`, { method: 'POST', headers: authorized, body: JSON.stringify({ backup: invalidSync }) })).status, 400);
     const persisted = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')); assert.equal(persisted.aiUsage.count, 20); assert.equal(JSON.stringify(persisted).includes(paired.token), false);
   } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
 });
@@ -176,7 +264,7 @@ test('scanner failures and incomplete snapshots never delete existing skills', a
   let count = 0;
   const fetcher: typeof fetch = async () => { count++; if (count === 1) return json({ id: 42, default_branch: 'main' }); if (count === 2) return json({ sha: 'fixed-commit', commit: { committer: { date: new Date().toISOString() } } }); return json({ message: 'rate limit' }, 429, { 'x-ratelimit-remaining': '0' }); };
   const result = await new GithubSkillScanner({ fetch: fetcher }).scan(source, [existing]);
-  assert.equal(result.complete, false); assert.equal(result.skills[0].maintenanceStatus, 'active'); assert.ok(result.source.cursor);
+  assert.equal(result.complete, false); assert.equal(result.skills[0].maintenanceStatus, 'active'); assert.equal(result.source.skillCount, 1); assert.ok(result.source.cursor);
   const resumed = await new GithubSkillScanner({ fetch: async () => json({ message: 'offline' }, 503) }).scan(result.source, result.skills);
   assert.equal(resumed.complete, false); assert.equal(resumed.skills[0].maintenanceStatus, 'active');
   const missing = await new GithubSkillScanner({ fetch: async () => json({}, 404) }).scan(source, [existing]);
@@ -201,7 +289,7 @@ test('blocked raw domain falls back to fixed-commit contents and resumes documen
     throw new Error('Unexpected request');
   };
   const first = await new GithubSkillScanner({ fetch: fetcher, maxDocuments: 1 }).scan(parseGithubSource('https://github.com/example/skills'));
-  assert.equal(first.complete, false); assert.equal(first.skills.length, 1); assert.ok(first.source.cursor);
+  assert.equal(first.complete, false); assert.equal(first.skills.length, 1); assert.equal(first.source.skillCount, 1); assert.ok(first.source.cursor);
   const next = await new GithubSkillScanner({ fetch: fetcher, maxDocuments: 1 }).scan(first.source, first.skills);
   assert.equal(next.complete, true); assert.equal(next.skills.length, 2); assert.equal(next.source.cursor, null);
 });

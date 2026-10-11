@@ -13,7 +13,7 @@ React + Vite + TypeScript；本机 Node.js 服务；个人数据留在本机。�
 
 保持服务窗口运行，关闭网页后仍会检查来源。关闭窗口或电脑关机后暂停；下次启动补查。手机可以使用在线页面的本地规则，但手机上的 `localhost` 指向手机，不能连接另一台电脑的 Codex。
 
-“开始这个任务”保存状态并提供执行文本；将文本粘贴到 Codex，才能实际制作视频、表格等文件。
+“复制给 Codex”生成可执行提示词：先说明当前步骤的操作，再明确调用真实 Skill 和所属插件，并附原始需求、参数及剩余流程。“开始这个任务”保存状态并提供同一份文本；将文本粘贴到 Codex，才能实际制作视频、表格等文件。
 
 ## 开发与生产
 
@@ -44,6 +44,10 @@ AI 通过官方 `codex exec` 读取标准输入，在独立临时目录、只读
 `.github/workflows/public-catalog.yml` 在 UTC 每六小时的第 17 分钟检查官方和热门来源，也支持 Actions → Run workflow。标准公开仓库 runner 免费；计划运行可能延迟，仓库长期无活动也可能停用，需手动恢复。[费用说明](https://docs.github.com/en/actions/concepts/billing-and-usage) · [调度限制](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
 CI 只读取公开仓库，写最新 `public/catalog-snapshot.json` 和游标，不调用个人 Codex，不包含个人任务、作者收藏、凭据或导入文件。官方源为 `openai/plugins` 和 `remotion-dev/skills`；历史 `openai/skills` 已弃用。README 仅补充背景，只有真实 SKILL.md 才收录。
+
+热门来源按跨主题查询的真实 stars 排序。扫描树游标单独保存在 `.github/catalog-scan-state.json`，不会让网页重复下载大型目录树；每轮先检查官方来源，再继续热门仓库的断点。已经整理好的中文说明在内容哈希未变化时保留，源文改变后重新进入解释队列。
+
+能力库收录公开来源的说明，不代表这些插件已在你的 Codex 中安装或账号已连接。详情保留原文、出处与前置条件，复制提示词会要求确认当前可用能力。普通本地办公任务优先使用对应文件 Skill，外部服务需明确指定并使用已有权限，不自动购买服务。
 
 本机每六小时检查个人来源与作者；按固定提交扫描、保留游标和内容哈希。网络失败/限流不标记删除；只有完整成功扫描能确认文件消失。同一内容不重复解释，后台每日最多 20 次中文解释，前台任务优先。
 
