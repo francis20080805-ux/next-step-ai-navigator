@@ -73,10 +73,11 @@ export async function readPublicCatalog(input: string, fetcher: typeof fetch = f
   if (skills.some(skill => skill.sourceType !== 'github' || !skill.githubUrl.startsWith('https://github.com/') || !skill.sourcePath || !skill.contentHash)) throw new Error('公开目录包含无法验证的来源');
   return skills;
 }
-export interface BridgeServerOptions { statePath?: string; pairCode?: string; codex?: CodexBridge; scanner?: () => GithubSkillScanner; catalogFetch?: typeof fetch; allowedOrigins?: string[]; serve?: boolean; }
+export interface BridgeServerOptions { statePath?: string; pairCode?: string; codex?: CodexBridge; scanner?: () => GithubSkillScanner; catalogFetch?: typeof fetch; allowedOrigins?: string[]; serve?: boolean; staticRoot?: string; backgroundPaused?: boolean; }
 export async function createBridgeServer(options: BridgeServerOptions = {}) {
   const store = new StateStore(options.statePath || join(baseDirectory, '.data', 'bridge-state.json'), seedSkills);
   await store.load();
+  const staticRoot = resolve(options.staticRoot || join(baseDirectory, 'dist'));
   const codex = options.codex || new CodexBridge();
   codex.backgroundDay = store.state.aiUsage.day; codex.interpretedToday = store.state.aiUsage.count; codex.pausedUntil = store.state.aiUsage.pausedUntil; codex.lastMessage = store.state.aiUsage.message;
   codex.onUsageChange = async () => { store.state.aiUsage = { day: codex.backgroundDay, count: codex.interpretedToday, pausedUntil: codex.pausedUntil, message: codex.lastMessage }; await store.save(); };
@@ -86,7 +87,7 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
   const pairingExpires = Date.now() + 15 * 60000;
   let pairUsed = false, attempts = 0;
   const tokens = new Set<string>();
-  let timer: NodeJS.Timeout | undefined, backgroundBusy = false;
+  let timer: NodeJS.Timeout | undefined, backgroundBusy = false, backgroundPaused = options.backgroundPaused === true;
   let statusCache: { time: number; value: Awaited<ReturnType<CodexBridge['status']>> } | undefined;
   const tasks = new Map<string, Promise<void>>();
   const send = (response: ServerResponse, code: number, value: unknown) => { response.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); response.end(JSON.stringify(value)); };
@@ -153,7 +154,7 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
     await run;
   }
   async function tick() {
-    if (!store.state.settings.automaticChecks || backgroundBusy) return;
+    if (backgroundPaused || !store.state.settings.automaticChecks || backgroundBusy) return;
     backgroundBusy = true;
     try {
       if (!store.state.lastDiscoveryAt || Date.now() - Date.parse(store.state.lastDiscoveryAt) >= 6 * 3600000) await discover();
@@ -198,9 +199,13 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
     if (api) { response.setHeader('Access-Control-Allow-Origin', origin); response.setHeader('Vary', 'Origin'); response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS'); response.setHeader('Access-Control-Allow-Private-Network', 'true'); }
     if (request.method === 'OPTIONS') { response.writeHead(204); return response.end(); }
     try {
+      if (request.method === 'GET' && url.pathname === '/api/health') {
+        const ready = options.serve === true && await stat(join(staticRoot, 'index.html')).then(file => file.isFile(), () => false);
+        return send(response, 200, { app: 'next-step-ai-navigator', ready });
+      }
       if (request.method === 'GET' && url.pathname === '/api/status') {
         if (!statusCache || Date.now() - statusCache.time > 10000) statusCache = { time: Date.now(), value: await codex.status() };
-        return send(response, 200, { connected: true, ...statusCache.value, backgroundEnabled: store.state.settings.automaticChecks, interpretedToday: codex.interpretedToday });
+        return send(response, 200, { connected: true, ...statusCache.value, backgroundEnabled: store.state.settings.automaticChecks && !backgroundPaused, interpretedToday: codex.interpretedToday });
       }
       if (request.method === 'POST' && url.pathname === '/api/pair') {
         const value = await body(request);
@@ -238,7 +243,7 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
       }
       if (url.pathname === '/api/settings') {
         if (request.method === 'GET') return send(response, 200, store.state.settings);
-        if (request.method === 'PATCH') { const value = await body(request); if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl) publicCatalogRequest(value.publicCatalogUrl); if (typeof value.automaticChecks === 'boolean') store.state.settings.automaticChecks = value.automaticChecks; if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl !== store.state.settings.publicCatalogUrl) { store.state.settings.publicCatalogUrl = value.publicCatalogUrl; store.state.publicCatalogSync = { lastAttemptAt: null, lastSuccessAt: null, error: null }; } await store.save(); return send(response, 200, store.state.settings); }
+        if (request.method === 'PATCH') { const value = await body(request); if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl) publicCatalogRequest(value.publicCatalogUrl); if (typeof value.automaticChecks === 'boolean') { store.state.settings.automaticChecks = value.automaticChecks; if (value.automaticChecks) backgroundPaused = false; } if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl !== store.state.settings.publicCatalogUrl) { store.state.settings.publicCatalogUrl = value.publicCatalogUrl; store.state.publicCatalogSync = { lastAttemptAt: null, lastSuccessAt: null, error: null }; } await store.save(); return send(response, 200, store.state.settings); }
       }
       if (url.pathname === '/api/tasks/interpret' && request.method === 'POST') {
         const value = await body(request, 5000000);
@@ -276,9 +281,9 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
       }
       if (url.pathname === '/api/scan/discover' && request.method === 'POST') { void discover().catch(() => {}); return send(response, 202, { message: '正在发现新的公开来源' }); }
       if (options.serve && !api && request.method === 'GET') {
-        const dist = join(baseDirectory, 'dist'); const pathname = decodeURIComponent(url.pathname); let path = resolve(dist, '.' + pathname);
-        if (path !== dist && !path.startsWith(dist + sep)) return send(response, 403, { error: '访问路径不正确' });
-        try { if (!(await stat(path)).isFile()) path = join(dist, 'index.html'); } catch { path = join(dist, 'index.html'); }
+        const pathname = decodeURIComponent(url.pathname); let path = resolve(staticRoot, '.' + pathname);
+        if (path !== staticRoot && !path.startsWith(staticRoot + sep)) return send(response, 403, { error: '访问路径不正确' });
+        try { if (!(await stat(path)).isFile()) path = join(staticRoot, 'index.html'); } catch { path = join(staticRoot, 'index.html'); }
         const contents = await readFile(path); const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' };
         response.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); return response.end(contents);
       }
@@ -289,7 +294,8 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
   return { server, pairCode, state: store.state, store, tick, startBackground() { timer = setInterval(() => void tick(), 60000); timer.unref(); setTimeout(() => void tick(), 10000).unref(); }, stopBackground() { if (timer) clearInterval(timer); } };
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  const bridge = await createBridgeServer({ serve: process.argv.includes('--serve') });
-  bridge.server.listen(8787, '127.0.0.1', () => { console.log(`本机服务已启动：http://127.0.0.1:8787\n连接码：${bridge.pairCode}（15 分钟内有效，仅可使用一次）\n关闭网页后，本机服务继续检查；关闭此服务后停止。`); bridge.startBackground(); });
+  const desktopMode = process.argv.includes('--local-desktop');
+  const bridge = await createBridgeServer({ serve: process.argv.includes('--serve'), backgroundPaused: desktopMode });
+  bridge.server.listen(8787, '127.0.0.1', () => { console.log(`本机服务已启动：http://127.0.0.1:8787\n连接码：${bridge.pairCode}（15 分钟内有效，仅可使用一次）\n${desktopMode ? '桌面本地模式：联网巡检和后台 AI 解释已暂停，原设置及队列保留。' : '关闭网页后，本机服务继续检查；关闭此服务后停止。'}`); bridge.startBackground(); });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { bridge.stopBackground(); bridge.server.close(() => process.exit(0)); });
 }

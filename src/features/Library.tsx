@@ -17,7 +17,7 @@ export function Library({ skills, favorites, onFavorite, onDetail, onImport }: {
   </section>;
 }
 
-export function ImportSkillModal({ skills, bridgeStatus, bridgeUrl, existing, onSave, onClose }: { skills: Skill[]; bridgeStatus: BridgeStatus; bridgeUrl: string; existing?: Skill; onSave: (skill: Skill) => void; onClose: () => void }) {
+export function ImportSkillModal({ skills, bridgeStatus, bridgeUrl, localMode = false, existing, onSave, onClose }: { skills: Skill[]; bridgeStatus: BridgeStatus; bridgeUrl: string; localMode?: boolean; existing?: Skill; onSave: (skill: Skill) => void; onClose: () => void }) {
   const [markdown, setMarkdown] = useState(''); const [filename, setFilename] = useState('SKILL.md');
   const [preview, setPreview] = useState<Skill | undefined>(existing); const [busy, setBusy] = useState(false);
   const [error, setError] = useState(''); const [notice, setNotice] = useState('');
@@ -29,10 +29,10 @@ export function ImportSkillModal({ skills, bridgeStatus, bridgeUrl, existing, on
     if (busy || !markdown.trim()) return; setBusy(true); setError(''); setNotice('');
     try {
       let skill: Skill;
-      if (bridgeStatus.connected && bridgeStatus.authMode === 'chatgpt' && hasBridgeToken()) {
+      if (!localMode && bridgeStatus.connected && bridgeStatus.authMode === 'chatgpt' && hasBridgeToken()) {
         try { const result = await interpretImportedSkill(bridgeUrl, markdown, filename); skill = result.skill; if (result.notice) setNotice(result.notice); }
         catch (failure) { skill = interpretSkillMarkdown(markdown, filename); setNotice(`${errorMessage(failure)} 请补充中文名称和用途后再加入。`); }
-      } else { skill = interpretSkillMarkdown(markdown, filename); setNotice(skill.interpretationStatus === 'ready' ? '识别到已有能力的说明，请检查下面的中文解释。' : '未连接 AI。已读取原始内容，请补充中文名称和用途，不会把英文原文当作中文解释。'); }
+      } else { skill = interpretSkillMarkdown(markdown, filename); setNotice(skill.interpretationStatus === 'ready' ? '识别到已有能力的说明，请检查下面的中文解释。' : `${localMode ? '正在使用本地推荐，不调用 AI。' : '未连接 AI。'}已读取原始内容，请补充中文名称和用途，不会把英文原文当作中文解释。`); }
       const ready = skill.interpretationStatus === 'ready';
       setPreview({ ...skill, sourceType: 'import' }); setChineseName(ready ? skill.chineseName : ''); setDescription(ready ? skill.simpleDescription : ''); setCategory(skill.category || '其他'); setConfirmed(ready);
     } catch (failure) { setError(errorMessage(failure)); }

@@ -14,6 +14,8 @@ import { Sources } from './features/Sources';
 import { Settings } from './features/Settings';
 import { Ranking } from './features/Ranking';
 import { updateSavedTaskCapabilities } from './core/WorkflowPlanner';
+import { isLocalRecommendationMode } from './services/RuntimeMode';
+import { mergeCatalogCache, readCatalogSnapshot } from './services/CatalogBootstrap';
 
 type Page = 'home' | 'history' | 'library' | 'ranking' | 'sources' | 'favorites' | 'settings';
 const pages = [{ id: 'home' as const, label: '首页', icon: Home }, { id: 'history' as const, label: '任务历史', icon: Clock3 }, { id: 'library' as const, label: '能力库', icon: Grid2X2 }, { id: 'ranking' as const, label: '推荐榜', icon: Trophy }, { id: 'sources' as const, label: '能力来源', icon: Link }, { id: 'favorites' as const, label: '收藏', icon: Star }, { id: 'settings' as const, label: '设置', icon: Settings2 }];
@@ -21,6 +23,7 @@ const pageFromHash = (): Page => pages.find(page => page.id === location.hash.re
 const normalizeStatus = (status: BridgeStatus): BridgeStatus => ({ ...status, connected: status.connected && status.authMode === 'chatgpt' && hasBridgeToken() });
 
 export default function App() {
+  const localMode = isLocalRecommendationMode(location.href);
   const [data, setData] = useState<AppData>(() => ({ ...defaultData(), skills: seedSkills }));
   const [loaded, setLoaded] = useState(false); const [storageError, setStorageError] = useState(''); const [canAutoSave, setCanAutoSave] = useState(false);
   const [page, setPage] = useState<Page>(pageFromHash); const [mobileMore, setMobileMore] = useState(false);
@@ -36,9 +39,10 @@ export default function App() {
   }, []);
   useEffect(() => {
     let cancelled = false;
-    void loadAppData().then(next => { if (!cancelled) { const skills = mergeSkills(seedSkills, next.skills); setData({ ...next, skills, tasks: next.tasks.map(task => updateSavedTaskCapabilities(task, skills)) }); setCanAutoSave(true); } }).catch(failure => { if (!cancelled) setStorageError(`无法读取这台设备的保存数据：${errorMessage(failure)} 当前操作暂时只保存在内存中，请先导出备份。`); }).finally(() => { if (!cancelled) setLoaded(true); });
+    const bundled = readCatalogSnapshot('/catalog-snapshot.json', location.href, fetch, 15000).catch(failure => { if (!cancelled) notify(`随附能力库暂时无法读取：${errorMessage(failure)} 已保留当前能力目录，可以继续使用。`, 'error'); return []; });
+    void Promise.all([loadAppData(), bundled]).then(([next, catalog]) => { if (!cancelled) { const skills = mergeCatalogCache(seedSkills, catalog, next.skills); setData({ ...next, skills, tasks: next.tasks.map(task => updateSavedTaskCapabilities(task, skills)) }); setCanAutoSave(true); } }).catch(failure => { if (!cancelled) setStorageError(`无法读取这台设备的保存数据：${errorMessage(failure)} 当前操作暂时只保存在内存中，请先导出备份。`); }).finally(() => { if (!cancelled) setLoaded(true); });
     return () => { cancelled = true; };
-  }, []);
+  }, [notify]);
   useEffect(() => {
     if (!loaded || !canAutoSave) return;
     saveQueue.current = saveQueue.current.then(() => saveAppData(data)).then(() => { setStorageError(''); settleTaskSaves(data); }).catch(failure => { setStorageError(`数据尚未保存：${errorMessage(failure)} 请保持页面打开并重试。`); settleTaskSaves(data, failure); });
@@ -67,23 +71,15 @@ export default function App() {
     return () => clearInterval(timer);
   }, [bridgePaired, loaded, refreshCatalog, notify]);
   const refreshPublic = useCallback(async (value: string) => {
-    const url = new URL(value, location.href);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('请填写有效的公共能力库网页地址。');
-    const response = await fetch(url.href, { signal: AbortSignal.timeout(60000), ...(url.hostname === 'api.github.com' ? { headers: { Accept: 'application/vnd.github.raw+json' } } : {}) });
-    if (!response.ok) throw new Error(`公共能力库暂时无法读取（${response.status}）。`);
-    const rawText = await response.text();
-    if (new TextEncoder().encode(rawText).byteLength > 25 * 1024 * 1024) throw new Error('公共能力库超过 25 MB，无法导入。');
-    const raw = JSON.parse(rawText) as unknown;
-    const skills = Array.isArray(raw) ? raw : (raw as { skills?: unknown })?.skills;
-    const validated = validateBackup({ ...defaultData(), skills });
-    setData(current => ({ ...current, skills: mergeSkills(current.skills, validated.skills) }));
+    const skills = await readCatalogSnapshot(value, location.href);
+    setData(current => ({ ...current, skills: mergeSkills(current.skills, skills) }));
   }, []);
   const loadedPublicUrl = useRef('');
   useEffect(() => {
     const url = data.settings.publicCatalogUrl;
-    if (!loaded || !url || loadedPublicUrl.current === url) return;
-    loadedPublicUrl.current = url; void refreshPublic(url).catch(failure => notify(errorMessage(failure), 'error'));
-  }, [loaded, data.settings.publicCatalogUrl, refreshPublic, notify]);
+    if (localMode || !loaded || !url || loadedPublicUrl.current === url) return;
+    loadedPublicUrl.current = url; void refreshPublic(url).catch(failure => notify(`${errorMessage(failure)} 已保留现有能力目录，可以继续使用。`, 'error'));
+  }, [localMode, loaded, data.settings.publicCatalogUrl, refreshPublic, notify]);
   function navigate(next: Page) { setPage(next); location.hash = `/${next}`; setMobileMore(false); window.scrollTo({ top: 0 }); }
   function updateTask(task: TaskRecord): Promise<void> { const saved = canAutoSave ? new Promise<void>((resolve, reject) => taskSaves.current.push({ task, resolve, reject })) : Promise.reject(new Error('当前保存数据无法读取，任务保留在内存中，请先导出备份。')); setData(current => ({ ...current, tasks: [task, ...current.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) })); setActiveTaskId(task.id); return saved; }
   function openTask(task: TaskRecord) { setActiveTaskId(task.id); setWorkspaceVersion(value => value + 1); navigate('home'); }
@@ -92,15 +88,15 @@ export default function App() {
   async function restore(next: AppData) { await saveQueue.current; const skills = mergeSkills(seedSkills, next.skills), restored = { ...next, skills, tasks: next.tasks.map(task => updateSavedTaskCapabilities(task, skills)) }; await saveAppData(restored); setData(restored); setActiveTaskId(undefined); setWorkspaceVersion(value => value + 1); setStorageError(''); setCanAutoSave(true); }
   const task = data.tasks.find(item => item.id === activeTaskId); const detailSkill = data.skills.find(item => item.id === detailId);
   const currentPage = pages.find(item => item.id === page)!;
-  return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#/home" onClick={() => navigate('home')}><ArrowRight size={32} strokeWidth={3} /><span>下一步</span></a><nav aria-label="主导航">{pages.map(({ id, label, icon: Icon }) => <a key={id} className={`nav-item ${page === id ? 'active' : ''}`} href={`#/${id}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon size={22} /><span>{label}</span></a>)}</nav><div className="sidebar-note"><span className={`connection-dot ${bridgeStatus.connected ? 'connected' : ''}`} />{bridgeStatus.connected ? '已连接你的 Codex' : '数据保存在这台设备'}</div></aside>
+  return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#/home" onClick={() => navigate('home')}><ArrowRight size={32} strokeWidth={3} /><span>下一步</span></a><nav aria-label="主导航">{pages.map(({ id, label, icon: Icon }) => <a key={id} className={`nav-item ${page === id ? 'active' : ''}`} href={`#/${id}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon size={22} /><span>{label}</span></a>)}</nav><div className="sidebar-note"><span className={`connection-dot ${!localMode && bridgeStatus.connected ? 'connected' : ''}`} />{localMode ? '正在使用本地推荐' : bridgeStatus.connected ? '已连接你的 Codex' : '数据保存在这台设备'}</div></aside>
     <div className="mobile-header"><a className="brand" href="#/home" onClick={() => navigate('home')}><ArrowRight size={26} strokeWidth={3} /><span>下一步</span></a><span className="mobile-page-label">{currentPage.label}</span></div>
-    <main className="main-content"><div className="content-inner"><div className="desktop-breadcrumb">{currentPage.label}</div>{storageError ? <div className="storage-error error-message" role="alert"><p>{storageError}</p><button className="secondary-button" onClick={async () => { try { if (!canAutoSave && !window.confirm('当前保存数据无法读取。继续会用当前页面的数据替换保存内容，请先在设置中导出备份。继续吗？')) return; await saveQueue.current; await saveAppData(data); setStorageError(''); setCanAutoSave(true); notify('数据已保存。'); } catch (failure) { setStorageError(errorMessage(failure)); } }}>重新保存</button></div> : null}
-      {!loaded ? <div className="loading-state"><LoaderCircle className="spin" size={24} />正在打开你的任务…</div> : page === 'home' ? <TaskWorkspace key={workspaceVersion} task={task} skills={data.skills} bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} preferAI={data.settings.preferAI} onTask={updateTask} onNew={() => { setActiveTaskId(undefined); setWorkspaceVersion(value => value + 1); }} onDetail={setDetailId} notify={notify} /> : page === 'history' ? <History tasks={data.tasks} onOpen={openTask} onFavorite={toggleTaskFavorite} onDelete={id => setData(current => ({ ...current, tasks: current.tasks.filter(item => item.id !== id) }))} /> : page === 'library' ? <Library skills={data.skills} favorites={data.favoriteSkillIds} onFavorite={toggleSkillFavorite} onDetail={setDetailId} onImport={() => setImportOpen(true)} /> : page === 'ranking' ? <Ranking skills={data.skills} favorites={data.favoriteSkillIds} onFavorite={toggleSkillFavorite} onDetail={setDetailId} /> : page === 'sources' ? <Sources bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} onSettings={() => navigate('settings')} onCatalogRefresh={refreshCatalog} notify={notify} /> : page === 'favorites' ? <Favorites tasks={data.tasks} skills={data.skills} favoriteSkillIds={data.favoriteSkillIds} onOpen={openTask} onTaskFavorite={toggleTaskFavorite} onSkillFavorite={toggleSkillFavorite} onDetail={setDetailId} /> : <Settings data={data} bridgeStatus={bridgeStatus} onChange={settings => setData(current => ({ ...current, settings }))} onStatus={status => setBridgeStatus(normalizeStatus(status))} onRestore={restore} onPublicRefresh={refreshPublic} notify={notify} />}
+    <main className="main-content"><div className="content-inner"><div className="desktop-breadcrumb">{currentPage.label}</div>{localMode ? <p className="notice" role="status">正在使用本地推荐。安排常见任务、能力库和保存进度无需 VPN。</p> : null}{storageError ? <div className="storage-error error-message" role="alert"><p>{storageError}</p><button className="secondary-button" onClick={async () => { try { if (!canAutoSave && !window.confirm('当前保存数据无法读取。继续会用当前页面的数据替换保存内容，请先在设置中导出备份。继续吗？')) return; await saveQueue.current; await saveAppData(data); setStorageError(''); setCanAutoSave(true); notify('数据已保存。'); } catch (failure) { setStorageError(errorMessage(failure)); } }}>重新保存</button></div> : null}
+      {!loaded ? <div className="loading-state"><LoaderCircle className="spin" size={24} />正在打开你的任务…</div> : page === 'home' ? <TaskWorkspace key={workspaceVersion} task={task} skills={data.skills} bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} preferAI={!localMode && data.settings.preferAI} onTask={updateTask} onNew={() => { setActiveTaskId(undefined); setWorkspaceVersion(value => value + 1); }} onDetail={setDetailId} notify={notify} /> : page === 'history' ? <History tasks={data.tasks} onOpen={openTask} onFavorite={toggleTaskFavorite} onDelete={id => setData(current => ({ ...current, tasks: current.tasks.filter(item => item.id !== id) }))} /> : page === 'library' ? <Library skills={data.skills} favorites={data.favoriteSkillIds} onFavorite={toggleSkillFavorite} onDetail={setDetailId} onImport={() => setImportOpen(true)} /> : page === 'ranking' ? <Ranking skills={data.skills} favorites={data.favoriteSkillIds} onFavorite={toggleSkillFavorite} onDetail={setDetailId} /> : page === 'sources' ? <Sources bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} onSettings={() => navigate('settings')} onCatalogRefresh={refreshCatalog} notify={notify} /> : page === 'favorites' ? <Favorites tasks={data.tasks} skills={data.skills} favoriteSkillIds={data.favoriteSkillIds} onOpen={openTask} onTaskFavorite={toggleTaskFavorite} onSkillFavorite={toggleSkillFavorite} onDetail={setDetailId} /> : <Settings data={data} bridgeStatus={bridgeStatus} localMode={localMode} onChange={settings => setData(current => ({ ...current, settings }))} onStatus={status => setBridgeStatus(normalizeStatus(status))} onRestore={restore} onPublicRefresh={refreshPublic} notify={notify} />}
     </div></main>
     <nav className="mobile-nav" aria-label="手机导航">{pages.filter(item => ['home', 'history', 'favorites'].includes(item.id)).map(({ id, label, icon: Icon }) => <a key={id} href={`#/${id}`} aria-current={page === id ? 'page' : undefined} className={page === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={21} /><span>{id === 'home' ? '任务' : label}</span></a>)}<button className={['library', 'ranking', 'sources', 'settings'].includes(page) ? 'active' : ''} onClick={() => setMobileMore(true)} aria-label="打开更多页面"><Menu size={21} /><span>更多</span></button></nav>
     {mobileMore ? <Modal title="更多" onClose={() => setMobileMore(false)}><nav className="more-nav">{pages.filter(item => ['library', 'ranking', 'sources', 'settings'].includes(item.id)).map(({ id, label, icon: Icon }) => <a key={id} href={`#/${id}`} onClick={() => navigate(id)}><Icon size={22} />{label}<ArrowRight size={17} /></a>)}</nav></Modal> : null}
     {detailSkill ? <SkillDetail skill={detailSkill} favorite={data.favoriteSkillIds.includes(detailSkill.id)} onFavorite={() => toggleSkillFavorite(detailSkill.id)} onClose={() => setDetailId(undefined)} onEdit={detailSkill.sourceType === 'import' || detailSkill.interpretationStatus !== 'ready' ? () => { setEditSkill(detailSkill); setDetailId(undefined); } : undefined} /> : null}
-    {importOpen || editSkill ? <ImportSkillModal skills={data.skills} bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} existing={editSkill} onClose={() => { setImportOpen(false); setEditSkill(undefined); }} onSave={skill => { setData(current => ({ ...current, skills: mergeSkills(current.skills, [skill]) })); notify('能力已加入，你可以在首页按任务使用它。'); }} /> : null}
+    {importOpen || editSkill ? <ImportSkillModal skills={data.skills} bridgeStatus={bridgeStatus} bridgeUrl={data.settings.bridgeUrl} localMode={localMode} existing={editSkill} onClose={() => { setImportOpen(false); setEditSkill(undefined); }} onSave={skill => { setData(current => ({ ...current, skills: mergeSkills(current.skills, [skill]) })); notify('能力已加入，你可以在首页按任务使用它。'); }} /> : null}
     {toast ? <div className={`toast toast-${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'}><span>{toast.message}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setToast(undefined)}><X size={17} /></button></div> : null}
   </div>;
 }

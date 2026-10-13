@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -16,6 +16,64 @@ class LocalCodex extends CodexBridge {
   override async status() { return { codexAvailable: true, authMode: 'none' as const, message: '本机未登录' }; }
   override async interpret(_prompt: string, _schema: unknown, _priority?: 'foreground' | 'background'): Promise<unknown> { throw new Error('本机未登录'); }
 }
+test('health is unpaired and private while preserving Host and Origin checks', async () => {
+  class ProbeCodex extends LocalCodex {
+    statusCalls = 0;
+    override async status() { this.statusCalls++; return super.status(); }
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-health-test-')), codex = new ProbeCodex();
+  await writeFile(join(directory, 'index.html'), '<html>Local page</html>');
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), codex, staticRoot: directory });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const port = (bridge.server.address() as { port: number }).port, base = `http://127.0.0.1:${port}`;
+  const headers = { Origin: 'http://127.0.0.1:8787' };
+  try {
+    const response = await fetch(base + '/api/health', { headers });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { app: 'next-step-ai-navigator', ready: false });
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(codex.statusCalls, 0);
+    assert.equal((await fetch(base + '/api/catalog', { headers })).status, 401);
+    assert.equal((await fetch(base + '/api/health')).status, 403);
+    assert.equal((await fetch(base + '/api/health', { headers: { Origin: 'https://evil.example' } })).status, 403);
+    const badHost = await new Promise<number | undefined>((resolve, reject) => {
+      const request = httpRequest(base + '/api/health', { headers: { ...headers, Host: `evil.example:${port}` } }, response => { response.resume(); resolve(response.statusCode); });
+      request.on('error', reject); request.end();
+    });
+    assert.equal(badHost, 403);
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('health reads the same static root as page serving and requires a regular index file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-health-static-test-')), index = join(directory, 'index.html');
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), codex: new LocalCodex(), serve: true, staticRoot: directory });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const base = `http://127.0.0.1:${(bridge.server.address() as { port: number }).port}`, headers = { Origin: base };
+  const health = async () => (await fetch(base + '/api/health', { headers })).json();
+  try {
+    assert.deepEqual(await health(), { app: 'next-step-ai-navigator', ready: false });
+    await mkdir(index);
+    assert.deepEqual(await health(), { app: 'next-step-ai-navigator', ready: false });
+    await rm(index, { recursive: true });
+    await writeFile(index, '<html><body>Ready local app</body></html>');
+    assert.deepEqual(await health(), { app: 'next-step-ai-navigator', ready: true });
+    const page = await fetch(base + '/'); assert.equal(page.status, 200); assert.match(await page.text(), /Ready local app/);
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('health defaults to the production dist directory without network access', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-health-production-test-'));
+  const expected = await stat(new URL('../dist/index.html', import.meta.url)).then(file => file.isFile(), () => false);
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), codex: new LocalCodex(), serve: true, catalogFetch: async () => { throw new Error('network must not be called'); } });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const base = `http://127.0.0.1:${(bridge.server.address() as { port: number }).port}`;
+  try {
+    const response = await fetch(base + '/api/health', { headers: { Origin: base } });
+    assert.equal(response.status, 200); assert.deepEqual(await response.json(), { app: 'next-step-ai-navigator', ready: expected });
+    if (expected) assert.equal((await fetch(base + '/')).status, 200);
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('bridge requires allowed Origin, loopback Host, one-use pairing and memory-only token', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'navigator-server-test-'));
   const statePath = join(directory, 'state.json');
@@ -105,6 +163,54 @@ test('background usage and pause survive a bridge restart', async () => {
     assert.equal(codex.backgroundDay, '2026-10-10'); assert.equal(codex.interpretedToday, 20); assert.equal(codex.pausedUntil, 1234567890000);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+test('desktop runtime pauses background calls without altering saved settings and resumes only when explicitly enabled', async () => {
+  class QueueCodex extends LocalCodex {
+    calls = 0;
+    override async interpret() { this.calls++; return { chineseName: '整理表格', simpleDescription: '帮你整理表格数据', category: 'spreadsheet', tags: [], userPhrases: [], taskTypes: ['spreadsheet'], stage: 'edit', required: false, conditions: [], excludeConditions: [], prerequisites: [], nextSkills: [] }; }
+  }
+  class QueueScanner extends GithubSkillScanner {
+    discoveries = 0; scans = 0;
+    override async discoverPopular() { this.discoveries++; return []; }
+    override async scan(source: ReturnType<typeof parseGithubSource>) { this.scans++; return { source: { ...source, status: 'complete' as const, lastCheckedAt: new Date().toISOString() }, skills: [], complete: true, processed: 0, total: 0 }; }
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-desktop-pause-test-')), path = join(directory, 'state.json');
+  const initial = new StateStore(path, seedSkills), time = new Date().toISOString();
+  initial.state.skills.push({ ...seedSkills[0], id: 'import-pending', contentHash: 'pending-one', interpretationStatus: 'pending' });
+  initial.state.sources = [parseGithubSource('https://github.com/example/skills')];
+  initial.state.jobs = [{ id: 'original-queue', sourceId: 'import-pending', kind: 'interpret', status: 'queued', message: '等待解释', processed: 0, total: 1, createdAt: time, updatedAt: time }];
+  await initial.save(); const originalFile = await readFile(path, 'utf8');
+  const codex = new QueueCodex(), scanner = new QueueScanner(); let scannerFactories = 0, catalogCalls = 0;
+  const bridge = await createBridgeServer({ statePath: path, pairCode: '123456', backgroundPaused: true, codex, scanner: () => { scannerFactories++; return scanner; }, catalogFetch: async () => { catalogCalls++; return json({ schemaVersion: 1, skills: [] }); } });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const base = `http://127.0.0.1:${(bridge.server.address() as { port: number }).port}`, headers = { Origin: base, 'Content-Type': 'application/json' };
+  const status = async () => (await fetch(base + '/api/status', { headers })).json();
+  try {
+    const pausedState = structuredClone(bridge.store.state);
+    assert.equal((await status()).backgroundEnabled, false);
+    await bridge.tick(); await bridge.tick();
+    assert.deepEqual([scannerFactories, scanner.discoveries, scanner.scans, catalogCalls, codex.calls], [0, 0, 0, 0, 0]);
+    assert.deepEqual(bridge.store.state, pausedState);
+    assert.equal(bridge.store.state.settings.automaticChecks, true);
+    assert.equal(await readFile(path, 'utf8'), originalFile);
+    const paired = await (await fetch(base + '/api/pair', { method: 'POST', headers, body: JSON.stringify({ code: '123456' }) })).json();
+    const authorized = { ...headers, Authorization: `Bearer ${paired.token}` };
+    const patch = async (value: unknown) => fetch(base + '/api/settings', { method: 'PATCH', headers: authorized, body: JSON.stringify(value) });
+    assert.equal((await patch({ publicCatalogUrl: defaultPublicCatalogUrl })).status, 200);
+    await bridge.tick(); assert.equal(scannerFactories, 0); assert.equal((await status()).backgroundEnabled, false);
+    assert.equal((await patch({ automaticChecks: false })).status, 200);
+    await bridge.tick(); assert.equal(scannerFactories, 0); assert.equal(bridge.store.state.settings.automaticChecks, false);
+    assert.deepEqual(bridge.store.state.jobs, pausedState.jobs);
+    assert.equal((await patch({ automaticChecks: true })).status, 200);
+    assert.equal((await status()).backgroundEnabled, true);
+    await bridge.tick();
+    assert.equal(scanner.discoveries, 1); assert.equal(scanner.scans, 1); assert.equal(catalogCalls, 1); assert.equal(codex.calls, 1);
+    assert.equal(bridge.store.state.skills.find(skill => skill.id === 'import-pending')?.interpretationStatus, 'ready');
+    const persisted = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(persisted.settings.automaticChecks, true); assert.equal('backgroundPaused' in persisted, false);
+    assert.ok(bridge.store.state.jobs.some(job => job.id === 'original-queue'));
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('AI explanation rejects hallucinated associations and invalid task requirements', () => {
   assert.throws(() => validateTaskIntent({ category: 'video' }));
   const base = seedSkills.find(skill => skill.capabilityKind === 'skill')!;
