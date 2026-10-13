@@ -13,6 +13,7 @@ import { ImportSkillModal, Library } from './features/Library';
 import { Sources } from './features/Sources';
 import { Settings } from './features/Settings';
 import { Ranking } from './features/Ranking';
+import { updateSavedTaskCapabilities } from './core/WorkflowPlanner';
 
 type Page = 'home' | 'history' | 'library' | 'ranking' | 'sources' | 'favorites' | 'settings';
 const pages = [{ id: 'home' as const, label: '首页', icon: Home }, { id: 'history' as const, label: '任务历史', icon: Clock3 }, { id: 'library' as const, label: '能力库', icon: Grid2X2 }, { id: 'ranking' as const, label: '推荐榜', icon: Trophy }, { id: 'sources' as const, label: '能力来源', icon: Link }, { id: 'favorites' as const, label: '收藏', icon: Star }, { id: 'settings' as const, label: '设置', icon: Settings2 }];
@@ -28,17 +29,19 @@ export default function App() {
   const [detailId, setDetailId] = useState<string>(); const [importOpen, setImportOpen] = useState(false); const [editSkill, setEditSkill] = useState<Skill>();
   const [toast, setToast] = useState<{ message: string; kind: 'error' | 'success' }>(); const toastTimer = useRef<number | undefined>(undefined);
   const saveQueue = useRef(Promise.resolve());
+  const taskSaves = useRef<{ task: TaskRecord; resolve: () => void; reject: (error: unknown) => void }[]>([]);
+  function settleTaskSaves(saved: AppData, failure?: unknown) { taskSaves.current = taskSaves.current.filter(waiter => { if (!saved.tasks.includes(waiter.task)) return true; if (failure) waiter.reject(failure); else waiter.resolve(); return false; }); }
   const notify = useCallback((message: string, kind: 'error' | 'success' = 'success') => {
     setToast({ message, kind }); window.clearTimeout(toastTimer.current); toastTimer.current = window.setTimeout(() => setToast(undefined), 6000);
   }, []);
   useEffect(() => {
     let cancelled = false;
-    void loadAppData().then(next => { if (!cancelled) { setData({ ...next, skills: mergeSkills(seedSkills, next.skills) }); setCanAutoSave(true); } }).catch(failure => { if (!cancelled) setStorageError(`无法读取这台设备的保存数据：${errorMessage(failure)} 当前操作暂时只保存在内存中，请先导出备份。`); }).finally(() => { if (!cancelled) setLoaded(true); });
+    void loadAppData().then(next => { if (!cancelled) { const skills = mergeSkills(seedSkills, next.skills); setData({ ...next, skills, tasks: next.tasks.map(task => updateSavedTaskCapabilities(task, skills)) }); setCanAutoSave(true); } }).catch(failure => { if (!cancelled) setStorageError(`无法读取这台设备的保存数据：${errorMessage(failure)} 当前操作暂时只保存在内存中，请先导出备份。`); }).finally(() => { if (!cancelled) setLoaded(true); });
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
     if (!loaded || !canAutoSave) return;
-    saveQueue.current = saveQueue.current.then(() => saveAppData(data)).then(() => setStorageError('')).catch(failure => setStorageError(`数据尚未保存：${errorMessage(failure)} 请保持页面打开并重试。`));
+    saveQueue.current = saveQueue.current.then(() => saveAppData(data)).then(() => { setStorageError(''); settleTaskSaves(data); }).catch(failure => { setStorageError(`数据尚未保存：${errorMessage(failure)} 请保持页面打开并重试。`); settleTaskSaves(data, failure); });
   }, [data, loaded, canAutoSave]);
   useEffect(() => { const onHash = () => setPage(pageFromHash()); window.addEventListener('hashchange', onHash); return () => window.removeEventListener('hashchange', onHash); }, []);
   useEffect(() => {
@@ -82,11 +85,11 @@ export default function App() {
     loadedPublicUrl.current = url; void refreshPublic(url).catch(failure => notify(errorMessage(failure), 'error'));
   }, [loaded, data.settings.publicCatalogUrl, refreshPublic, notify]);
   function navigate(next: Page) { setPage(next); location.hash = `/${next}`; setMobileMore(false); window.scrollTo({ top: 0 }); }
-  function updateTask(task: TaskRecord) { setData(current => ({ ...current, tasks: [task, ...current.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) })); setActiveTaskId(task.id); }
+  function updateTask(task: TaskRecord): Promise<void> { const saved = canAutoSave ? new Promise<void>((resolve, reject) => taskSaves.current.push({ task, resolve, reject })) : Promise.reject(new Error('当前保存数据无法读取，任务保留在内存中，请先导出备份。')); setData(current => ({ ...current, tasks: [task, ...current.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) })); setActiveTaskId(task.id); return saved; }
   function openTask(task: TaskRecord) { setActiveTaskId(task.id); setWorkspaceVersion(value => value + 1); navigate('home'); }
   function toggleSkillFavorite(id: string) { setData(current => ({ ...current, favoriteSkillIds: current.favoriteSkillIds.includes(id) ? current.favoriteSkillIds.filter(item => item !== id) : [...current.favoriteSkillIds, id] })); }
   function toggleTaskFavorite(task: TaskRecord) { setData(current => ({ ...current, tasks: current.tasks.map(item => item.id === task.id ? { ...item, favorite: !item.favorite } : item) })); }
-  async function restore(next: AppData) { await saveQueue.current; await saveAppData(next); setData({ ...next, skills: mergeSkills(seedSkills, next.skills) }); setActiveTaskId(undefined); setWorkspaceVersion(value => value + 1); setStorageError(''); setCanAutoSave(true); }
+  async function restore(next: AppData) { await saveQueue.current; const skills = mergeSkills(seedSkills, next.skills), restored = { ...next, skills, tasks: next.tasks.map(task => updateSavedTaskCapabilities(task, skills)) }; await saveAppData(restored); setData(restored); setActiveTaskId(undefined); setWorkspaceVersion(value => value + 1); setStorageError(''); setCanAutoSave(true); }
   const task = data.tasks.find(item => item.id === activeTaskId); const detailSkill = data.skills.find(item => item.id === detailId);
   const currentPage = pages.find(item => item.id === page)!;
   return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#/home" onClick={() => navigate('home')}><ArrowRight size={32} strokeWidth={3} /><span>下一步</span></a><nav aria-label="主导航">{pages.map(({ id, label, icon: Icon }) => <a key={id} className={`nav-item ${page === id ? 'active' : ''}`} href={`#/${id}`} aria-current={page === id ? 'page' : undefined} onClick={() => navigate(id)}><Icon size={22} /><span>{label}</span></a>)}</nav><div className="sidebar-note"><span className={`connection-dot ${bridgeStatus.connected ? 'connected' : ''}`} />{bridgeStatus.connected ? '已连接你的 Codex' : '数据保存在这台设备'}</div></aside>

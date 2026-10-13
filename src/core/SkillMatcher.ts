@@ -1,7 +1,7 @@
 import type { Skill, TaskIntent } from '../domain/types.ts';
 
 const preferred: Record<string, string[]> = {
-  'video.create': ['remotion-create'], 'video.materials': ['remotion-multimedia'],
+  'video.create': ['remotion-create'], 'video.materials': ['remotion-markup', 'remotion-create'],
   'video.captions': ['remotion-captions'], 'video.export': ['remotion-render'],
   'spreadsheet.create': ['Spreadsheets'], 'spreadsheet.quantity': ['Spreadsheets'],
   'data.organize': ['Spreadsheets'], 'data.analyze': ['Spreadsheets'], 'data.charts': ['Spreadsheets'],

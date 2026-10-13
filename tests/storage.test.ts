@@ -24,3 +24,11 @@ test('same content public cache preserves local interpretation; changed content 
   assert.equal(mergeSkills([ready],[{...pending,maintenanceStatus:'removed'}])[0].maintenanceStatus,'removed');
   assert.equal(mergeSkills([ready],[{...pending,contentHash:'sha256:b'}])[0].interpretationStatus,'pending');
 });
+test('an older built-in cache cannot undo a corrected capability, while personal imports remain intact',()=>{
+  const current=seedSkills.find(skill=>skill.name==='remotion-multimedia')!;
+  const older={...current,version:'catalog-1',chineseName:'旧版错误的素材编排说明'};
+  assert.equal(mergeSkills([current],[older])[0].chineseName,current.chineseName);
+  assert.equal(mergeSkills([older],[current])[0].version,'catalog-2');
+  const personal={...older,sourceType:'import' as const,chineseName:'我自己的说明'};
+  assert.equal(mergeSkills([current],[personal])[0].chineseName,personal.chineseName);
+});

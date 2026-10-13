@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { TaskRecord } from '../src/domain/types.ts';
 import { seedSkills } from '../src/data/seedSkills.ts';
 import { interpretLocal, planWorkflowFromIntent } from '../src/core/TaskInterpreter.ts';
-import { buildCodexPrompt, completeStep, planWorkflow } from '../src/core/WorkflowPlanner.ts';
+import { buildCodexPrompt, completeStep, planWorkflow, updateSavedTaskCapabilities } from '../src/core/WorkflowPlanner.ts';
 import { searchSkills } from '../src/core/SearchEngine.ts';
 import { interpretSkillMarkdown } from '../src/core/SkillInterpreter.ts';
 
@@ -12,6 +12,26 @@ function task(input: string, previous?: TaskRecord): TaskRecord {
   if (result.kind !== 'task') throw new Error(`Unexpected clarification for ${input}`);
   return result.task;
 }
+
+test('material arrangement and music use markup rather than a media-information reader', () => {
+  const result=task('我有产品图片和背景音乐，要做一个30秒竖屏宣传视频，不要字幕');
+  const media=result.steps.find(step=>step.action==='video.materials')!;
+  assert.equal(media.skillName,'remotion-markup');
+  const prompt=buildCodexPrompt(result,seedSkills);
+  assert.match(prompt,/\$remotion-markup/);assert.ok(!prompt.includes('$remotion-multimedia'));
+});
+
+test('saved pending material steps update their capability without changing history or identifiers', () => {
+  const initial=task('我有产品图片，要做一个30秒竖屏视频');
+  const saved=completeStep(initial,initial.steps[0].id);
+  const media=saved.steps.find(step=>step.action==='video.materials')!;
+  media.skillId='remotion:remotion-multimedia';media.skillName='remotion-multimedia';
+  const before=structuredClone(saved),updated=updateSavedTaskCapabilities(saved,seedSkills);
+  assert.equal(updated.steps.find(step=>step.action==='video.materials')?.skillName,'remotion-markup');
+  assert.deepEqual(updated.steps.map(step=>[step.id,step.status,step.dependencies]),before.steps.map(step=>[step.id,step.status,step.dependencies]));
+  assert.deepEqual(updated.steps[0],before.steps[0]);
+  assert.equal(updated.originalInput,before.originalInput);assert.equal(updated.updatedAt,before.updatedAt);assert.deepEqual(saved,before);
+});
 function actions(record: TaskRecord): string[] { return record.steps.map((step) => step.action); }
 
 test('vague video and spreadsheet requests ask accessible questions', () => {

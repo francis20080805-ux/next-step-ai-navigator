@@ -117,6 +117,14 @@ export function completeStep(task: TaskRecord, stepId: string): TaskRecord {
   };
 }
 
+export function updateSavedTaskCapabilities(task: TaskRecord, catalog: Skill[]): TaskRecord {
+  return { ...task, steps: task.steps.map(step => {
+    if (step.status !== 'pending' || step.action !== 'video.materials' || step.skillName !== 'remotion-multimedia') return step;
+    const skill = matchSkill(step.action, task.intent, catalog);
+    return skill ? { ...step, skillId: skill.id, skillName: skill.name, capabilityKind: skill.capabilityKind } : step;
+  }) };
+}
+
 export function buildCodexPrompt(task: TaskRecord, catalog: Skill[] = []): string {
   const pending = task.steps.filter((step) => step.status === 'pending');
   const completed = task.steps.filter((step) => step.status === 'completed');

@@ -6,9 +6,9 @@ type Seed = [string, string, string, string, TaskCategory, SkillStage, string[]]
 const definitions: Seed[] = [
   ['remotion', 'remotion-create', '做视频', '把文案和素材做成一段视频。', 'video', 'create', ['短视频', '宣传视频', '图文视频', '从零做视频']],
   ['remotion', 'remotion-captions', '给视频加字幕', '把说话内容变成字幕，也能调整字幕样式。', 'video', 'edit', ['字幕', '自动字幕', '口播字幕', 'srt']],
-  ['remotion', 'remotion-multimedia', '整理视频素材', '把图片、视频、声音和背景音乐放到合适的位置。', 'video', 'edit', ['剪视频', '素材', '背景音乐', '配乐', '产品图片']],
+  ['remotion', 'remotion-multimedia', '查看音视频信息', '读取音视频素材的时长、宽度和高度。', 'video', 'prepare', ['音频多长', '视频多长', '素材尺寸', '视频分辨率']],
   ['remotion', 'remotion-render', '导出视频', '把做好的视频输出成可以观看和分享的文件。', 'video', 'export', ['导出', '竖屏', '横屏', '1080', '视频文件']],
-  ['remotion', 'remotion-best-practices', '检查视频制作方法', '帮助检查视频制作中的常见问题。', 'video', 'check', ['视频代码', '视频制作问题']],
+  ['remotion', 'remotion-best-practices', '选择视频制作流程', '根据需求选择制作、预览、修改或导出流程。', 'video', 'prepare', ['视频制作流程', '选择视频工具']],
   ['remotion', 'remotion-studio', '预览视频', '先看看画面和声音，再继续调整。', 'video', 'check', ['预览', '看看效果']],
   ['figma', 'figma-use', '调整设计文件', '在已有设计文件中读取或调整页面和组件。', 'design', 'edit', ['Figma', '修改设计', '设计文件', '检查图层']],
   ['figma', 'figma-design-to-code', '把设计图做成网页', '读取设计稿，并按设计制作可用的网页。', 'website', 'design', ['Figma转网页', '设计图转网页', '设计稿', '照着设计图']],
@@ -39,8 +39,8 @@ const definitions: Seed[] = [
   ['sites', 'sites', '发布和管理网站', '把完成的网站发布出去，或管理已有网站。', 'website', 'publish', ['发布网站', '网站上线', 'Sites']],
   ['heygen', 'heygen-workflows', '制作口播视频', '用人物、声音和文案制作口播或宣传视频。', 'video', 'create', ['口播视频', '数字人', 'HeyGen']],
   ['remotion', 'remotion-maps', '制作地图视频', '用地图画面展示地点和路线。', 'video', 'create', ['地图视频', '路线动画']],
-  ['remotion', 'remotion-markup', '调整视频画面', '调整视频内容、动画和画面效果。', 'video', 'edit', ['视频动画', '调整画面']],
-  ['remotion', 'remotion-interactivity', '制作可互动视频', '让视频里的内容支持互动。', 'video', 'edit', ['互动视频']],
+  ['remotion', 'remotion-markup', '编排素材与视频画面', '把图片、音视频放进时间线，再调整动画和画面。', 'video', 'edit', ['剪视频', '素材编排', '背景音乐', '配乐', '视频动画', '调整画面']],
+  ['remotion', 'remotion-interactivity', '调整视频场景参数', '让制作预览器中的场景支持拖动、缩放和参数调整。', 'video', 'edit', ['视频场景参数', '预览器编辑', '视频组件属性']],
   ['remotion', 'remotion-upgrade', '更新视频制作工具', '更新视频项目里的制作工具。', 'video', 'prepare', ['升级Remotion']],
   ['remotion', 'remotion-saas', '开发视频生成应用', '把视频制作功能做成应用。', 'website', 'create', ['视频生成应用', '视频SaaS']],
   ['openai-docs', 'openai-docs', '查阅 AI 产品说明', '查看 AI 产品和开发功能的官方使用说明。', 'research', 'prepare', ['OpenAI', 'Codex说明', 'ChatGPT使用']],
@@ -70,8 +70,8 @@ function fromDefinition([pluginId, name, chineseName, simpleDescription, type, s
     skillMarkdown: `# ${name}\n\n本条是本应用整理的推荐摘要，不是官方完整使用说明。\n\n${simpleDescription}\n\n实际执行请让 Codex 读取当前环境中的同名 Skill。`,
     category: labels[type], tags: [labels[type], ...userPhrases.slice(0, 3)], userPhrases,
     taskTypes: [type], stage, required: false, conditions, excludeConditions: [],
-    prerequisites: [], nextSkills: [], githubUrl: '', sourceType: 'system', version: 'catalog-1',
-    updatedAt: '2026-10-10T00:00:00.000Z', maintenanceStatus: 'active', capabilityKind: 'skill',
+    prerequisites: [], nextSkills: [], githubUrl: '', sourceType: 'system', version: 'catalog-2',
+    updatedAt: '2026-10-13T00:00:00.000Z', maintenanceStatus: 'active', capabilityKind: 'skill',
     sourcePath: '', contentHash: '', interpretationStatus: 'ready',
   };
 }

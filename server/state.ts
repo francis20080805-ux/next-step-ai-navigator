@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Skill, Source, ScanJob } from '../src/domain/types.ts';
 import { officialSources, parseGithubSource } from './GithubSkillScanner.ts';
+import { mergeSkills } from '../src/services/SkillRepository.ts';
 export const defaultPublicCatalogUrl = 'https://api.github.com/repos/francis20080805-ux/next-step-ai-navigator/contents/public/catalog-snapshot.json';
 export interface PublicCatalogSync { lastAttemptAt: string | null; lastSuccessAt: string | null; error: string | null; }
 export interface BridgeState { schemaVersion: 1; skills: Skill[]; sources: Source[]; authors: Source[]; jobs: ScanJob[]; settings: { automaticChecks: boolean; publicCatalogUrl: string }; lastDiscoveryAt: string | null; publicCatalogSync: PublicCatalogSync; aiUsage: { day: string; count: number; pausedUntil: number; message: string }; }
@@ -10,12 +11,14 @@ export class StateStore {
   path: string;
   state: BridgeState;
   private saving = Promise.resolve();
-  constructor(path: string, skills: Skill[]) { this.path = path; this.state = { schemaVersion: 1, skills: structuredClone(skills), sources: officialSources.map(parseGithubSource), authors: [], jobs: [], settings: { automaticChecks: true, publicCatalogUrl: defaultPublicCatalogUrl }, lastDiscoveryAt: null, publicCatalogSync: { lastAttemptAt: null, lastSuccessAt: null, error: null }, aiUsage: { day: '', count: 0, pausedUntil: 0, message: '' } }; }
+  private initialSkills: Skill[];
+  constructor(path: string, skills: Skill[]) { this.path = path; this.initialSkills = structuredClone(skills); this.state = { schemaVersion: 1, skills: structuredClone(skills), sources: officialSources.map(parseGithubSource), authors: [], jobs: [], settings: { automaticChecks: true, publicCatalogUrl: defaultPublicCatalogUrl }, lastDiscoveryAt: null, publicCatalogSync: { lastAttemptAt: null, lastSuccessAt: null, error: null }, aiUsage: { day: '', count: 0, pausedUntil: 0, message: '' } }; }
   async load() {
     try {
       const data = JSON.parse(await readFile(this.path, 'utf8'));
       if (data.schemaVersion !== 1 || !Array.isArray(data.skills) || !Array.isArray(data.sources) || !Array.isArray(data.authors)) throw new Error('本机数据格式无法识别，未覆盖原文件');
       this.state = { ...this.state, ...data, jobs: (data.jobs || []).map((job: ScanJob) => job.status === 'running' ? { ...job, status: 'paused', message: '本机服务重新启动，等待继续' } : job) };
+      this.state.skills = mergeSkills(this.initialSkills, this.state.skills);
       this.state.settings = { ...this.state.settings, publicCatalogUrl: this.state.settings.publicCatalogUrl || defaultPublicCatalogUrl };
       this.state.publicCatalogSync = { lastAttemptAt: null, lastSuccessAt: null, error: null, ...data.publicCatalogSync };
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
