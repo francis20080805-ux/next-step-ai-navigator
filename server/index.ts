@@ -26,9 +26,10 @@ async function body(request: IncomingMessage, maxBytes = 1000000): Promise<Recor
 }
 function validateCatalog(value: unknown, fallback: Skill[]): Skill[] {
   if (value === undefined) return fallback;
-  if (!Array.isArray(value) || value.length > 1500) throw new Error('能力库格式不正确');
+  if (!Array.isArray(value) || value.length > 10000) throw new Error('能力库格式不正确');
   if (value.some(skill => !skill || typeof skill.id !== 'string' || typeof skill.name !== 'string' || typeof skill.chineseName !== 'string' || !Array.isArray(skill.taskTypes) || !Array.isArray(skill.conditions) || !Array.isArray(skill.excludeConditions) || !Array.isArray(skill.prerequisites) || !Array.isArray(skill.nextSkills) || !['skill', 'connector'].includes(skill.capabilityKind))) throw new Error('能力库格式不正确');
   for (const skill of value) {
+    if (skill.githubStars !== undefined && (!Number.isSafeInteger(skill.githubStars) || skill.githubStars < 0)) throw new Error('仓库星数格式不正确');
     for (const key of ['id', 'name', 'chineseName', 'pluginId', 'description', 'skillMarkdown', 'simpleDescription', 'category', 'githubUrl', 'version', 'updatedAt', 'sourcePath', 'contentHash']) if (typeof skill[key] !== 'string' || skill[key].length > (key === 'skillMarkdown' ? 250000 : 12000)) throw new Error('能力文字字段格式不正确');
     for (const key of ['tags', 'userPhrases', 'taskTypes', 'conditions', 'excludeConditions', 'prerequisites', 'nextSkills']) if (!Array.isArray(skill[key]) || skill[key].length > 100 || skill[key].some((item: unknown) => typeof item !== 'string' || item.length > 1200)) throw new Error('能力列表格式不正确');
     if (!skill.taskTypes.every((category: unknown) => categories.includes(category as typeof categories[number])) || !stages.includes(skill.stage) || typeof skill.required !== 'boolean' || !['system', 'github', 'import'].includes(skill.sourceType) || !['active', 'stale', 'deprecated', 'removed', 'unavailable'].includes(skill.maintenanceStatus) || !['ready', 'pending', 'failed'].includes(skill.interpretationStatus)) throw new Error('能力状态格式不正确');
@@ -240,7 +241,7 @@ export async function createBridgeServer(options: BridgeServerOptions = {}) {
         if (request.method === 'PATCH') { const value = await body(request); if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl) publicCatalogRequest(value.publicCatalogUrl); if (typeof value.automaticChecks === 'boolean') store.state.settings.automaticChecks = value.automaticChecks; if (typeof value.publicCatalogUrl === 'string' && value.publicCatalogUrl !== store.state.settings.publicCatalogUrl) { store.state.settings.publicCatalogUrl = value.publicCatalogUrl; store.state.publicCatalogSync = { lastAttemptAt: null, lastSuccessAt: null, error: null }; } await store.save(); return send(response, 200, store.state.settings); }
       }
       if (url.pathname === '/api/tasks/interpret' && request.method === 'POST') {
-        const value = await body(request);
+        const value = await body(request, 5000000);
         if (typeof value.input !== 'string' || !value.input.trim() || value.input.length > 5000) throw new Error('请用不超过 5000 字描述你的任务');
         const previous = value.previous as TaskRecord | undefined;
         if (previous && (!Array.isArray(previous.steps) || !Array.isArray(previous.inputs) || !previous.intent || typeof previous.id !== 'string')) throw new Error('上次任务格式不正确');

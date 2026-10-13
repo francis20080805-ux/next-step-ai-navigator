@@ -77,6 +77,7 @@ export class GithubSkillScanner {
     try {
       if (!cursor) {
         const repo = await this.request(`/repos/${source.owner}/${source.repo}`);
+        if (Number.isSafeInteger(repo.stargazers_count) && repo.stargazers_count >= 0) source = { ...source, stars: repo.stargazers_count };
         const commit = await this.request(`/repos/${source.owner}/${source.repo}/commits/${encodeURIComponent(repo.default_branch)}`);
         cursor = { sha: commit.sha, repoId: String(repo.id), updatedAt: commit.commit?.committer?.date || repo.pushed_at || now(), archived: Boolean(repo.archived), files: [], trees: [{ sha: commit.sha, prefix: '' }], readOffset: 0, readme: '', plugins: {}, seen: [], completeTree: false };
         const tree = await this.request(`/repos/${source.owner}/${source.repo}/git/trees/${cursor.sha}?recursive=1`);
@@ -105,7 +106,7 @@ export class GithubSkillScanner {
         const entry = files[cursor.readOffset];
         const id = `github:${cursor.repoId}:${entry.path}`;
         const old = found.find(skill => skill.id === id);
-        if (old?.contentHash === entry.sha) { old.maintenanceStatus = deprecated ? 'deprecated' : Date.now() - Date.parse(cursor.updatedAt) > 180 * 86400000 ? 'stale' : 'active'; cursor.seen.push(id); cursor.readOffset++; continue; }
+        if (old?.contentHash === entry.sha) { old.maintenanceStatus = deprecated ? 'deprecated' : Date.now() - Date.parse(cursor.updatedAt) > 180 * 86400000 ? 'stale' : 'active'; if (source.stars !== undefined) old.githubStars = source.stars; cursor.seen.push(id); cursor.readOffset++; continue; }
         if ((entry.size || 0) > 250000) { cursor.readOffset++; continue; }
         const markdown = await this.document(source, cursor.sha, entry.path);
         let parsed: Skill;
@@ -118,7 +119,7 @@ export class GithubSkillScanner {
           if (cursor.files.some(file => file.path === manifestPath)) { try { const manifest = JSON.parse(await this.document(source, cursor.sha, manifestPath)); if (typeof manifest.name === 'string') pluginId = manifest.name; } catch (error) { if (error instanceof GithubLimitError) throw error; } }
           cursor.plugins[pluginRoot] = pluginId;
         }
-        const skill: Skill = { ...parsed, id, pluginId: pluginRoot ? cursor.plugins[pluginRoot] : pluginId, sourceType: 'github', sourcePath: entry.path, githubUrl: `${source.url}/blob/${cursor.sha}/${entry.path}`, contentHash: entry.sha, updatedAt: cursor.updatedAt, maintenanceStatus: deprecated ? 'deprecated' : Date.now() - Date.parse(cursor.updatedAt) > 180 * 86400000 ? 'stale' : 'active', interpretationStatus: 'pending' };
+        const skill: Skill = { ...parsed, id, pluginId: pluginRoot ? cursor.plugins[pluginRoot] : pluginId, sourceType: 'github', sourcePath: entry.path, githubUrl: `${source.url}/blob/${cursor.sha}/${entry.path}`, contentHash: entry.sha, updatedAt: cursor.updatedAt, maintenanceStatus: deprecated ? 'deprecated' : Date.now() - Date.parse(cursor.updatedAt) > 180 * 86400000 ? 'stale' : 'active', interpretationStatus: 'pending', ...(source.stars !== undefined ? { githubStars: source.stars } : {}) };
         const index = found.findIndex(item => item.id === id);
         index < 0 ? found.push(skill) : found.splice(index, 1, skill);
         cursor.seen.push(id); cursor.readOffset++; processed++;

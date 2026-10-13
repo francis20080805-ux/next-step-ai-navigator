@@ -24,7 +24,7 @@ export async function pairBridge(base: string, code: string) {
   sessionStorage.setItem(TOKEN_KEY, result.token);
 }
 export const getBridgeStatus = (base: string) => request<BridgeStatus>(base, '/api/status');
-export const interpretTask = (base: string, input: string, previous: TaskRecord | undefined, catalog: Skill[]) => request<InterpretationResult>(base, '/api/tasks/interpret', { input, previous, catalog: catalog.map(skill=>({...skill,skillMarkdown:''})) });
+export const interpretTask = (base: string, input: string, previous: TaskRecord | undefined, catalog: Skill[]) => request<InterpretationResult>(base, '/api/tasks/interpret', { input, previous, catalog: catalog.filter(skill=>skill.interpretationStatus==='ready').map(skill=>({...skill,skillMarkdown:''})) });
 export const interpretImportedSkill = (base: string, markdown: string, filename?: string) => request<{ skill: Skill; mode: 'local' | 'codex'; notice?: string }>(base, '/api/skills/interpret', { markdown, filename });
 export const getCatalog = (base: string) => request<Skill[]>(base, '/api/catalog');
 export const getSources = (base: string) => request<Source[]>(base, '/api/sources');

@@ -11,6 +11,7 @@ export interface Skill {
   sourceType: 'system' | 'github' | 'import'; version: string; updatedAt: string;
   maintenanceStatus: MaintenanceStatus; capabilityKind: CapabilityKind;
   sourcePath: string; contentHash: string; interpretationStatus: 'ready' | 'pending' | 'failed';
+  githubStars?: number;
 }
 export type Requirement = 'required' | 'excluded' | 'unspecified';
 export interface TaskIntent {

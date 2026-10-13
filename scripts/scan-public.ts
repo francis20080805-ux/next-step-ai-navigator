@@ -55,6 +55,12 @@ const stateTemporary = `${statePath}.${randomUUID()}.tmp`;
 await writeFile(stateTemporary, JSON.stringify({ schemaVersion: 1, cursors: Object.fromEntries(snapshot.sources.filter(source => source.cursor).map(source => [source.id, source.cursor])) }, null, 2));
 await rename(stateTemporary, statePath);
 snapshot.sources = snapshot.sources.map(source => ({ ...source, cursor: null }));
+const sourceStars = new Map(snapshot.sources.filter(source => source.stars !== undefined).map(source => [source.url.toLowerCase(), source.stars!]));
+snapshot.skills = snapshot.skills.map(skill => {
+  const repoUrl = skill.githubUrl.match(/^https:\/\/github\.com\/[^/]+\/[^/]+/i)?.[0].toLowerCase();
+  const stars = repoUrl ? sourceStars.get(repoUrl) : undefined;
+  return stars === undefined ? skill : { ...skill, githubStars: stars };
+});
 const normalize = (value: PublicSnapshot) => JSON.stringify(value);
 let existing = '';
 try { existing = normalize(JSON.parse(await readFile(path, 'utf8'))); } catch {}

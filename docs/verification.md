@@ -1,11 +1,11 @@
 # MVP 验证记录
 
-验证日期：2026-10-10 至 2026-10-11；Windows，Node.js 24.19.0。
+验证日期：2026-10-10 至 2026-10-12；Windows，Node.js 24.19.0。
 
 ## 已验证的交付
 
 - TypeScript 全项目检查通过；Vite 生产构建通过，输出在 `dist/`。
-- 59 项可运行自动检查通过，覆盖本地任务、执行提示词、AI 数据验证、保存/恢复、配对、来源扫描与续传、高星来源排序、游标拆分与迁移和真实 Skill 名称。执行 `pnpm test` 可复查。
+- 69 项可运行自动检查通过，覆盖本地任务、执行提示词、AI 数据验证、保存/恢复、配对、来源扫描与续传、高星来源排序、游标拆分与迁移、真实 Skill 名称、超过 1 MB 的大型目录继续任务，以及排行过滤、真实仓库星数、重复来源和星数在备份中保留。执行 `pnpm test` 可复查。
 - Playwright 的 19 项完整操作链路与 4 项真实本机备份检查通过；1440×1024、390×844、320×740 的六页无横向溢出，运行时错误 0。错误连接码/恶意备份产生的 403/400 是预期拒绝。
 - 首页输入与澄清、当前步骤推进、补充已完成视频、刷新后恢复历史、导入/搜索/收藏、复制与开始任务、浏览器备份恢复均已实际操作。
 - 45 个预置 Skill 名称逐个与本机原 SKILL.md 的 YAML name 对照通过；4 个服务能力独立标为连接器。详见 `core-review.md`。
@@ -22,7 +22,7 @@
 
 ## 发布核验
 
-源码仓库已实际创建并推送： https://github.com/francis20080805-ux/next-step-ai-navigator 。免费巡检定义为 `17 */6 * * *`，只在公开仓库运行标准 runner；[首次手动运行](https://github.com/francis20080805-ux/next-step-ai-navigator/actions/runs/38051430280) 已成功生成最新通用快照。
+源码仓库已实际创建并推送： https://github.com/francis20080805-ux/next-step-ai-navigator 。免费巡检定义为 `17 */6 * * *`，只在公开仓库运行标准 runner；[首次手动运行](https://github.com/francis20080805-ux/next-step-ai-navigator/actions/runs/38051430280) 和 [最终实现的巡检](https://github.com/francis20080805-ux/next-step-ai-navigator/actions/runs/38141466934) 均成功。后者已保存 561 条真实 Skill 与 7 个扫描游标，同一内容的 438 条已有中文说明完整保留，详见 `ci-verification.md`。
 
 Sites 项目已实际创建且访问策略核实为 **custom，仅 owner 一人，0 个外部访问者、0 个组**。私有部署 URL 与最终部署状态以本次工具返回和交付说明为准；创建项目本身不代表已上线。源码推送与部署不读取 `.data`、`.env`、浏览器存储或登录凭据。
 
@@ -34,4 +34,4 @@ Sites 项目已实际创建且访问策略核实为 **custom，仅 owner 一人�
 - 背景中文解释每天最多 20 次、前台队列优先；已经运行的背景请求会完成后处理前台请求。AI 网络/额度/格式失败采用明确本地推荐；未知任务继续澄清，新能力等解释或人工确认。
 - 首页只规划并交付可复制任务，实际成果在 Codex 执行。应用不提供任意命令、远程控制或自行发送邮件等执行接口。
 
-详细验证：`core-review.md`、`bridge-verification.md`、`ui-verification.md`、`copy-prompt.md`、`production-verification.md`。个人截图和真实调用记录留在本机，不纳入公开源码。
+详细验证：`core-review.md`、`bridge-verification.md`、`ui-verification.md`、`copy-prompt.md`、`production-verification.md`、`ranking-verification.md`。个人截图和真实调用记录留在本机，不纳入公开源码。

@@ -10,7 +10,7 @@ export function SkillCard({ skill, favorite, onFavorite, onDetail }: { skill: Sk
   return <article className="skill-card">
     <div className="card-heading"><button className="card-title-button" onClick={onDetail}><h3>{skill.chineseName}</h3></button><button className={`icon-button ${favorite ? 'favorited' : ''}`} aria-label={favorite ? `取消收藏${skill.chineseName}` : `收藏${skill.chineseName}`} aria-pressed={favorite} onClick={onFavorite}><Star size={19} fill={favorite ? 'currentColor' : 'none'} /></button></div>
     <p>{skill.simpleDescription}</p><small className="skill-english">{skill.name}</small>
-    <div className="card-footer"><span>{skill.category} · {sourceNames[skill.sourceType]}</span>{skill.interpretationStatus !== 'ready' ? <span className="badge badge-warning">待补充中文解释</span> : skill.maintenanceStatus !== 'active' ? <span className="badge badge-warning">{maintenanceNames[skill.maintenanceStatus]}</span> : null}<button className="text-button" onClick={onDetail}>详细信息<ChevronRight size={15} /></button></div>
+    <div className="card-footer"><span>{skill.category} · {sourceNames[skill.sourceType]}</span>{skill.interpretationStatus !== 'ready' ? <span className="badge badge-warning">用途待确认</span> : skill.maintenanceStatus !== 'active' ? <span className="badge badge-warning">{maintenanceNames[skill.maintenanceStatus]}</span> : null}<button className="text-button" onClick={onDetail}>详细信息<ChevronRight size={15} /></button></div>
   </article>;
 }
 

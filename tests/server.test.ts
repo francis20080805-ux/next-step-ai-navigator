@@ -45,6 +45,25 @@ test('bridge requires allowed Origin, loopback Host, one-use pairing and memory-
     assert.equal((await fetch(`${base}/api/exec`, { method: 'POST', headers: authorized, body: JSON.stringify({ command: 'calc.exe' }) })).status, 404);
   } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
 });
+test('task interpretation accepts a large explained catalog and preserves remaining video steps', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'navigator-large-task-catalog-'));
+  const bridge = await createBridgeServer({ statePath: join(directory, 'state.json'), pairCode: '123456', codex: new LocalCodex() });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  const base = `http://127.0.0.1:${(bridge.server.address() as { port: number }).port}`;
+  const headers = { Origin: 'http://127.0.0.1:5173', 'Content-Type': 'application/json' };
+  try {
+    const paired = await (await fetch(base + '/api/pair', { method: 'POST', headers, body: JSON.stringify({ code: '123456' }) })).json();
+    const catalog = [...seedSkills, ...Array.from({ length: 1501 }, (_, index) => ({ ...seedSkills[0], id: `large-${index}`, description: 'a'.repeat(1200) }))];
+    const requestBody = JSON.stringify({ input: '视频已经做好了，只加字幕，最后导出', catalog });
+    assert.ok(Buffer.byteLength(requestBody) > 1000000);
+    assert.ok(Buffer.byteLength(requestBody) < 5000000);
+    const response = await fetch(base + '/api/tasks/interpret', { method: 'POST', headers: { ...headers, Authorization: `Bearer ${paired.token}` }, body: requestBody });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.kind, 'task'); assert.equal(result.task.mode, 'local');
+    assert.deepEqual(result.task.steps.filter((step: { status: string }) => step.status === 'pending').map((step: { action: string }) => step.action), ['video.captions', 'video.export']);
+  } finally { bridge.server.close(); await once(bridge.server, 'close'); await rm(directory, { recursive: true, force: true }); }
+});
 test('origin and Github URLs have exact allowlists', () => {
   assert.equal(validOrigin('http://127.0.0.1:5173', ['http://127.0.0.1:5173']), true);
   assert.equal(validOrigin('http://127.0.0.1:5173.evil.example', ['http://127.0.0.1:5173']), false);
