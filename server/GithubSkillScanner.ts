@@ -19,6 +19,15 @@ export function parseGithubSource(input: string): Source {
 }
 type TreeFile = { path: string; sha: string; size?: number; mode?: string; type: string };
 interface Cursor { sha: string; repoId: string; updatedAt: string; archived: boolean; files: TreeFile[]; trees: { sha: string; prefix: string }[]; readOffset: number; readme: string; plugins: Record<string, string>; seen: string[]; completeTree: boolean; }
+// A persisted cursor is stored in git (CI scan state), so it must stay small:
+// resuming only ever reads skill documents, the root README (deprecation
+// check) and plugin manifests. Keeping every blob of a repository tree —
+// API URLs included — grew the state file past GitHub's 100 MiB file limit.
+const cursorFilePattern = /(^|\/)skill\.md$|^readme\.md$|^plugins\/[^/]+\/\.codex-plugin\/plugin\.json$/i;
+function compactCursor(cursor: Cursor): Cursor {
+  return { ...cursor, files: cursor.files.filter(entry => cursorFilePattern.test(entry.path)).map(entry => ({ path: entry.path, sha: entry.sha, ...(entry.size !== undefined ? { size: entry.size } : {}), type: 'blob' })) };
+}
+const encodeCursor = (cursor: Cursor): string => Buffer.from(JSON.stringify(compactCursor(cursor))).toString('base64url');
 export class GithubLimitError extends Error {
   retryAt: number;
   constructor(message: string, retryAt = Date.now() + 3600000) { super(message); this.retryAt = retryAt; }
@@ -129,10 +138,10 @@ export class GithubSkillScanner {
         const paths = new Set(files.map(entry => entry.path));
         for (const skill of found) if (!paths.has(skill.sourcePath)) skill.maintenanceStatus = 'removed';
       }
-      return { source: { ...source, status: complete ? 'complete' : 'partial', cursor: complete ? null : Buffer.from(JSON.stringify(cursor)).toString('base64url'), snapshotSha: cursor.sha, lastCheckedAt: now(), lastSuccessAt: complete ? now() : source.lastSuccessAt, skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, error: null }, skills: found, complete, processed, total: files.length };
+      return { source: { ...source, status: complete ? 'complete' : 'partial', cursor: complete ? null : encodeCursor(cursor), snapshotSha: cursor.sha, lastCheckedAt: now(), lastSuccessAt: complete ? now() : source.lastSuccessAt, skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, error: null }, skills: found, complete, processed, total: files.length };
     } catch (error) {
       const partial = Boolean(cursor);
-      return { source: { ...source, status: partial ? 'partial' : 'error', lastCheckedAt: now(), skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, snapshotSha: cursor?.sha || source.snapshotSha, cursor: cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : source.cursor, error: error instanceof Error ? error.message : '检查失败' }, skills: found, complete: false, processed, total: cursor?.files.filter(entry => /(^|\/)skill\.md$/i.test(entry.path)).length || 0 };
+      return { source: { ...source, status: partial ? 'partial' : 'error', lastCheckedAt: now(), skillCount: found.filter(skill => skill.maintenanceStatus !== 'removed').length, snapshotSha: cursor?.sha || source.snapshotSha, cursor: cursor ? encodeCursor(cursor) : source.cursor, error: error instanceof Error ? error.message : '检查失败' }, skills: found, complete: false, processed, total: cursor?.files.filter(entry => /(^|\/)skill\.md$/i.test(entry.path)).length || 0 };
     }
   }
   async discoverPopular(): Promise<Source[]> {
